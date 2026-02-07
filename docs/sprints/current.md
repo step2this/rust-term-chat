@@ -4,7 +4,7 @@
 
 Implement a WebSocket-based relay server and client as fallback transport when P2P (QUIC) connections fail. This completes Phase 4: Hybrid Networking.
 
-## Status: In Progress
+## Status: Done
 
 ## Prerequisites (all met)
 
@@ -18,29 +18,38 @@ Implement a WebSocket-based relay server and client as fallback transport when P
 
 | UC | Title | Status | Task Decomposition | Agent Team |
 |----|-------|--------|--------------------|------------|
-| UC-004 | Relay Fallback | Not Started | — | — |
+| UC-004 | Relay Messages via Server | Done | `docs/tasks/uc-004-tasks.md` | `docs/teams/uc-004-team.md` |
 
-## Rust Concepts to Learn
+## Results
+
+- **Tests**: 247 total (57 new for UC-004)
+- **New files**: 7 (relay server: main.rs, relay.rs, store.rs; relay client: relay.rs; proto: relay.rs; integration: relay_fallback.rs; relay lib.rs)
+- **Modified files**: 6 (workspace Cargo.toml, termchat Cargo.toml, relay Cargo.toml, transport/mod.rs, hybrid.rs, proto/lib.rs)
+- **Team**: Lead + Builder-Relay + Builder-Client + Reviewer (4 agents)
+- **Parallelism**: Server and client tracks ran simultaneously (zero merge conflicts)
+
+## Rust Concepts Learned
 
 Per blueprint (Section 2.4):
-- WebSockets (tokio-tungstenite)
-- State machines (relay connection lifecycle)
-- Enum-based transport abstraction (Transport trait, already exists)
-- Trait objects (dynamic dispatch for hybrid transport)
+- [x] WebSockets (tokio-tungstenite client, axum WebSocket server)
+- [x] State machines (relay connection lifecycle: connect -> register -> active -> disconnect)
+- [x] Enum-based transport abstraction (Transport trait, RelayTransport implements it)
+- [x] tokio::select! for multiplexing (HybridTransport recv across both transports)
 
 ## Process Checklist
 
-Before starting implementation:
-- [ ] Write UC-004 use case with `/uc-create`
-- [ ] Review UC-004 with `/uc-review`
-- [ ] Fix review issues
-- [ ] Run `/task-decompose uc-004` to break into tasks
-- [ ] Run `/agent-team-plan uc-004` to design agent team
-- [ ] Get user approval on team plan
-- [ ] Spawn team and execute
-- [ ] Gate 3: `cargo fmt --check && cargo clippy -- -D warnings && cargo test`
-- [ ] Verification: `cargo test --test relay_fallback`
-- [ ] Commit
+- [x] Write UC-004 use case with `/uc-create`
+- [x] Review UC-004 with `/uc-review` (score: 9/10, 5 fixes applied)
+- [x] Fix review issues
+- [x] Run `/task-decompose uc-004` to break into tasks (16 tasks)
+- [x] Run `/agent-team-plan uc-004` to design agent team (4 agents)
+- [x] Get user approval on team plan
+- [x] Spawn team and execute
+- [x] Gate 1: `cargo test -p termchat-relay && cargo clippy -p termchat-relay -- -D warnings` (15 tests)
+- [x] Gate 2: `cargo test -p termchat -- hybrid::tests && cargo clippy -p termchat -- -D warnings` (8 tests)
+- [x] Gate 3: `cargo fmt --check && cargo clippy -- -D warnings && cargo test` (247 tests)
+- [x] Verification: `cargo test --test relay_fallback` (15 tests)
+- [x] Commit
 
 ## Previous Sprints
 

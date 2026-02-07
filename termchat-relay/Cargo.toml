@@ -7,5 +7,10 @@ license.workspace = true
 [dependencies]
 termchat-proto = { path = "../termchat-proto" }
 serde = { workspace = true }
+bincode = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+axum = { workspace = true, features = ["ws"] }
+futures-util = { workspace = true }
+tokio-tungstenite = { workspace = true }

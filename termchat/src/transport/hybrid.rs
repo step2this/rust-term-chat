@@ -94,10 +94,9 @@ impl Default for PendingQueue {
 ///
 /// # Recv behavior
 ///
-/// Receives from whichever transport has data available first.
-/// Currently delegates to the preferred transport. Full multiplexed
-/// recv across both transports will be added when real P2P + relay
-/// coexist.
+/// Receives from whichever transport has data available first using
+/// `tokio::select!`. Messages arriving on either the preferred or
+/// fallback transport are returned as they arrive.
 pub struct HybridTransport<P: Transport, F: Transport> {
     /// The preferred transport (e.g., P2P).
     preferred: P,
@@ -205,9 +204,12 @@ impl<P: Transport, F: Transport> Transport for HybridTransport<P, F> {
     }
 
     async fn recv(&self) -> Result<(PeerId, Vec<u8>), TransportError> {
-        // TODO: Multiplex recv across both transports using tokio::select!
-        // For now, delegate to the preferred transport.
-        self.preferred.recv().await
+        // Multiplex recv across both transports: whichever has data first wins.
+        // Box::pin is needed because RPITIT futures may not be Unpin.
+        tokio::select! {
+            result = Box::pin(self.preferred.recv()) => result,
+            result = Box::pin(self.fallback.recv()) => result,
+        }
     }
 
     fn is_connected(&self, peer: &PeerId) -> bool {
@@ -395,5 +397,137 @@ mod tests {
             let val = u32::from_le_bytes(msg.payload.clone().try_into().unwrap());
             assert_eq!(val, i as u32);
         }
+    }
+
+    // --- T-004-14: HybridTransport recv multiplexing tests ---
+
+    #[tokio::test]
+    async fn recv_from_fallback_only() {
+        let (pref_a, _pref_b) = preferred_pair();
+        let (fall_a, fall_b) = fallback_pair();
+
+        let hybrid = HybridTransport::new(pref_a, fall_a);
+
+        // Send via the fallback transport's remote side.
+        fall_b
+            .send(&PeerId::new("alice"), b"via fallback")
+            .await
+            .unwrap();
+
+        // recv() should return the fallback message.
+        let (from, data) = tokio::time::timeout(std::time::Duration::from_secs(5), hybrid.recv())
+            .await
+            .expect("recv timed out")
+            .unwrap();
+
+        assert_eq!(from, PeerId::new("bob"));
+        assert_eq!(data, b"via fallback");
+    }
+
+    #[tokio::test]
+    async fn recv_from_preferred_still_works() {
+        let (pref_a, pref_b) = preferred_pair();
+        let (fall_a, _fall_b) = fallback_pair();
+
+        let hybrid = HybridTransport::new(pref_a, fall_a);
+
+        // Send via the preferred transport's remote side.
+        pref_b
+            .send(&PeerId::new("alice"), b"via preferred")
+            .await
+            .unwrap();
+
+        let (from, data) = tokio::time::timeout(std::time::Duration::from_secs(5), hybrid.recv())
+            .await
+            .expect("recv timed out")
+            .unwrap();
+
+        assert_eq!(from, PeerId::new("bob"));
+        assert_eq!(data, b"via preferred");
+    }
+
+    #[tokio::test]
+    async fn recv_interleaved_from_both_transports() {
+        let (pref_a, pref_b) = preferred_pair();
+        let (fall_a, fall_b) = fallback_pair();
+
+        let hybrid = HybridTransport::new(pref_a, fall_a);
+
+        // Send messages on both transports.
+        pref_b.send(&PeerId::new("alice"), b"pref-1").await.unwrap();
+        fall_b.send(&PeerId::new("alice"), b"fall-1").await.unwrap();
+        pref_b.send(&PeerId::new("alice"), b"pref-2").await.unwrap();
+        fall_b.send(&PeerId::new("alice"), b"fall-2").await.unwrap();
+
+        // Receive all four messages. Order between transports is not
+        // deterministic (select! picks whichever is ready first), but
+        // all messages must arrive.
+        let mut received = Vec::new();
+        for _ in 0..4 {
+            let (_from, data) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), hybrid.recv())
+                    .await
+                    .expect("recv timed out")
+                    .unwrap();
+            received.push(data);
+        }
+
+        // Sort for deterministic comparison.
+        received.sort();
+        let mut expected: Vec<Vec<u8>> = vec![
+            b"fall-1".to_vec(),
+            b"fall-2".to_vec(),
+            b"pref-1".to_vec(),
+            b"pref-2".to_vec(),
+        ];
+        expected.sort();
+        assert_eq!(received, expected);
+    }
+
+    #[tokio::test]
+    async fn recv_returns_data_when_only_fallback_has_messages() {
+        // Both transports are open. Only the fallback has data. The
+        // preferred transport's recv() blocks (no data available).
+        // select! should pick the fallback branch since it's ready.
+        let (pref_a, _pref_b) = preferred_pair();
+        let (fall_a, fall_b) = fallback_pair();
+
+        let hybrid = HybridTransport::new(pref_a, fall_a);
+
+        // Send on fallback only — preferred stays open but empty.
+        fall_b
+            .send(&PeerId::new("alice"), b"only fallback")
+            .await
+            .unwrap();
+
+        let (from, data) = tokio::time::timeout(std::time::Duration::from_secs(5), hybrid.recv())
+            .await
+            .expect("recv timed out")
+            .unwrap();
+
+        assert_eq!(from, PeerId::new("bob"));
+        assert_eq!(data, b"only fallback");
+    }
+
+    #[tokio::test]
+    async fn recv_returns_data_when_only_preferred_has_messages() {
+        // Inverse: only preferred has data, fallback blocks.
+        let (pref_a, pref_b) = preferred_pair();
+        let (fall_a, _fall_b) = fallback_pair();
+
+        let hybrid = HybridTransport::new(pref_a, fall_a);
+
+        pref_b
+            .send(&PeerId::new("alice"), b"only preferred")
+            .await
+            .unwrap();
+
+        let (from, data) = tokio::time::timeout(std::time::Duration::from_secs(5), hybrid.recv())
+            .await
+            .expect("recv timed out")
+            .unwrap();
+
+        assert_eq!(from, PeerId::new("bob"));
+        assert_eq!(data, b"only preferred");
     }
 }

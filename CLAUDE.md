@@ -6,18 +6,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project State
 
-Active development. Three-crate workspace is initialized and building. Completed: UC-001 (Send), UC-002 (Receive), UC-005 (E2E Handshake), UC-003 (P2P Connection), Phase 1 (Hello Ratatui TUI). 190 tests passing. Next: UC-004 (Relay Fallback).
+Active development. Three-crate workspace is initialized and building. Completed: UC-001 (Send), UC-002 (Receive), UC-005 (E2E Handshake), UC-003 (P2P Connection), UC-004 (Relay Fallback), Phase 1 (Hello Ratatui TUI). 247 tests passing. Phase 4 (Hybrid Networking) complete. Next: UC-006 (Create Room).
 
 ## Build & Development Commands
 
 ```bash
 cargo build
 cargo run                                # launch TUI client
-cargo run --bin termchat-relay           # relay server (stub)
-cargo test                               # all tests (190)
+cargo run --bin termchat-relay           # relay server (ws://0.0.0.0:9000)
+cargo test                               # all tests (247)
 cargo test --test send_receive           # UC-001/UC-002 integration test
 cargo test --test e2e_encryption         # UC-005 integration test
 cargo test --test p2p_connection         # UC-003 integration test
+cargo test --test relay_fallback         # UC-004 integration test
+cargo test -p termchat-relay             # relay server unit tests
 cargo test --lib                         # unit tests only
 cargo test -p termchat-proto             # proto crate tests only
 cargo fmt --check
@@ -52,12 +54,19 @@ termchat/src/
     mod.rs         # Transport trait, PeerId, TransportError
     loopback.rs    # LoopbackTransport (mpsc channels, for testing)
     quic.rs        # QuicTransport + QuicListener (QUIC via quinn, UC-003)
-    hybrid.rs      # HybridTransport (preferred + fallback + offline queue)
+    hybrid.rs      # HybridTransport (preferred + fallback + offline queue, tokio::select! recv mux)
+    relay.rs       # RelayTransport (WebSocket relay client, UC-004)
+
+termchat-relay/src/
+  main.rs          # axum server entry point (configurable via RELAY_ADDR env)
+  relay.rs         # RelayState, WebSocket handler, peer registry, message routing
+  store.rs         # MessageStore: per-peer FIFO queues (1000 cap, eviction)
 
 termchat-proto/src/
   lib.rs           # Crate root
   message.rs       # Wire format types: ChatMessage, Envelope, DeliveryAck, Nack, etc.
   codec.rs         # Bincode encode/decode with length-prefix framing
+  relay.rs         # RelayMessage enum: Register, Registered, RelayPayload, Queued, Error
 ```
 
 ### File Ownership (for agent teams)

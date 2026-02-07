@@ -22,9 +22,13 @@ rand = "0.8"
 quinn = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rcgen = "0.13"
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+termchat-relay = { path = "../termchat-relay" }
 
 [[test]]
 name = "send_receive"
@@ -37,3 +41,7 @@ path = "../tests/integration/e2e_encryption.rs"
 [[test]]
 name = "p2p_connection"
 path = "../tests/integration/p2p_connection.rs"
+
+[[test]]
+name = "relay_fallback"
+path = "../tests/integration/relay_fallback.rs"
