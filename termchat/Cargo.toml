@@ -1,0 +1,21 @@
+[package]
+name = "termchat"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+termchat-proto = { path = "../termchat-proto" }
+serde = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[[test]]
+name = "send_receive"
+path = "../tests/integration/send_receive.rs"

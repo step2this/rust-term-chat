@@ -1,0 +1,18 @@
+[package]
+name = "termchat-proto"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[[test]]
+name = "serialization"
+path = "../tests/property/serialization.rs"

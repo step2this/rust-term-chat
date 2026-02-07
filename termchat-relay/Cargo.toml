@@ -1,0 +1,11 @@
+[package]
+name = "termchat-relay"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+termchat-proto = { path = "../termchat-proto" }
+serde = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
