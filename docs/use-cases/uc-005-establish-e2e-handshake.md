@@ -36,16 +36,17 @@
   1. Key material (private keys, ephemeral keys, shared secrets) is never logged, serialized to disk, or transmitted in plaintext
   2. Handshake messages follow the Noise XX pattern exactly (no custom deviations)
   3. Both sides must complete all 3 handshake messages before the session is usable
+  4. Ephemeral keys are single-use — each handshake generates fresh ephemeral keys (enforced by Rust ownership: `into_transport(self)` consumes the handshake)
 
 ## Main Success Scenario
 1. Initiator generates an ephemeral x25519 keypair
-2. Initiator constructs Noise XX message 1 (→ e) and sends it via Transport Layer
+2. Initiator constructs Noise XX message 1 (→ e), wraps it in an `Envelope::Handshake` frame, and sends it via Transport Layer
 3. Responder receives message 1, generates their own ephemeral keypair
 4. Responder constructs Noise XX message 2 (← e, ee, s, es) containing their encrypted static key
-5. Responder sends message 2 via Transport Layer
+5. Responder wraps message 2 in an `Envelope::Handshake` frame and sends it via Transport Layer
 6. Initiator receives message 2, decrypts Responder's static key, verifies identity
 7. Initiator constructs Noise XX message 3 (→ s, se) containing their encrypted static key
-8. Initiator sends message 3 via Transport Layer
+8. Initiator wraps message 3 in an `Envelope::Handshake` frame and sends it via Transport Layer
 9. Responder receives message 3, decrypts Initiator's static key, verifies identity
 10. Both peers derive the shared transport keys (CipherState pair for send/receive)
 11. Both peers store the Noise session in memory, keyed by peer ID
@@ -68,6 +69,11 @@
   1. Responder's Noise library returns a parse/processing error
   2. Responder logs error with payload hash (not content)
   3. Responder discards the message, no state created
+  4. Use case fails; Initiator will time out (extension 6b)
+- **4b. Noise XX message 2 construction fails (snow `write_message` error)**:
+  1. Responder sets handshake state to `Failed` with the error reason
+  2. Responder discards ephemeral keypair and all partial state
+  3. Responder logs "Handshake failed: message 2 construction error"
   4. Use case fails; Initiator will time out (extension 6b)
 - **4a. Responder is already in a handshake with this Initiator**:
   1. Responder compares peer IDs lexicographically to break the tie
@@ -92,6 +98,11 @@
   1. Initiator discards ephemeral keypair
   2. Initiator reports "Handshake timed out waiting for response"
   3. Use case fails
+- **7a. Noise XX message 3 construction fails (snow `write_message` error)**:
+  1. Initiator sets handshake state to `Failed` with the error reason
+  2. Initiator discards all handshake state
+  3. Initiator reports "Handshake failed: message 3 construction error"
+  4. Use case fails; Responder will time out (extension 9b)
 - **8a. Transport send fails on message 3**:
   1. Initiator discards all handshake state
   2. Initiator reports "Handshake failed: connection lost during final step"
@@ -113,6 +124,12 @@
   1. Both peers detect this via a key validation check
   2. Both peers abort the session and discard all state
   3. Report "Handshake failed: key derivation error" (this should never happen with correct Noise implementation)
+
+- **11a. Session storage fails (e.g., session map lock poisoned or memory exhaustion)**:
+  1. The completed session object is lost despite successful handshake
+  2. Peer reports "Handshake completed but session could not be stored"
+  3. Next message send/receive will trigger a new handshake (UC-001 ext 4a / UC-002 ext 3a)
+  4. Use case fails
 
 ## Variations
 - **6a-alt.** In automated/CI mode, key verification may use a trust-on-first-use (TOFU) policy without user prompts

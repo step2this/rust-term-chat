@@ -17,7 +17,7 @@
 ## Conditions
 - **Preconditions** (must be true before starting):
   1. Recipient has a valid identity keypair
-  2. Recipient knows Sender's public identity (keypair exchange has occurred; Noise session may or may not be established yet)
+  2. Recipient MAY know Sender's public identity (unknown senders trigger handshake via extension 3a; Noise session may or may not be established yet)
   3. Recipient's application is running and listening on at least one transport
 - **Success Postconditions** (true when done right):
   1. Decrypted message is displayed in the correct conversation in the UI
@@ -31,7 +31,7 @@
   3. Sender does NOT receive a false delivery acknowledgment
 - **Invariants** (must remain true throughout):
   1. Plaintext message never leaves the application boundary
-  2. Message ordering is preserved per-conversation
+  2. Message ordering is preserved per-conversation (transport FIFO order, not timestamp-sorted)
   3. Duplicate messages are detected and deduplicated
 
 ## Main Success Scenario
@@ -74,15 +74,21 @@
   1. System logs the validation failure
   2. System displays the message with a warning indicator ("clock skew detected")
   3. Continues to step 7
-- **6c. Sender ID in message metadata does not match Noise-authenticated peer identity**:
+- **6b. Sender ID in message metadata does not match Noise-authenticated peer identity**:
   1. System rejects the message (potential spoofing or relay injection)
   2. System logs security warning with both IDs (transport-authenticated vs. claimed)
   3. System does NOT display the message
   4. System does NOT send delivery acknowledgment
   5. Use case ends
-- **6b. Conversation ID references unknown conversation**:
+- **6c. Conversation ID references unknown conversation**:
   1. System creates a new conversation for this peer
   2. Returns to step 7
+- **6d. Message ID matches a previously received message (duplicate)**:
+  1. System detects the duplicate via `seen_message_ids` tracking set (capacity: 10,000; evicts oldest half when full)
+  2. System silently drops the duplicate message
+  3. System does NOT re-store in history or re-display
+  4. System still sends delivery acknowledgment (Sender may have missed the first ack)
+  5. Use case ends
 - **7a. Local history storage fails (disk full, database error)**:
   1. System displays the message in UI (still useful even if not persisted)
   2. System shows warning: "Message could not be saved to history"
