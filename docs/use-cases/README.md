@@ -9,7 +9,7 @@
 | UC-005 | Establish E2E Handshake | Subfunction | P0 | Sprint 2 | `da5f397` | 149 cumulative |
 | UC-003 | Establish P2P Connection | User Goal | P1 | Sprint 3 | `69e0f17` | 190 cumulative |
 | UC-004 | Relay Messages via Server | User Goal | P1 | Sprint 4 | `47334e6` | 247 cumulative |
-| UC-006 | Create Room | User Goal | P2 | Sprint 5 | `d9f8cef` | 318 cumulative |
+| UC-006 | Create Room | User Goal | P2 | Sprint 5 | `d95f56f` | 318 cumulative |
 
 ## In Progress
 
@@ -28,7 +28,7 @@
 | Phase 2: Local Chat | Done | `c2d368f` | UC-001 + UC-002 (localhost send/receive) |
 | Phase 3: E2E Encryption | Done | `da5f397` | UC-005 (Noise XX handshake) |
 | Phase 4: Hybrid Networking | Done | `47334e6` | UC-003 + UC-004 |
-| Phase 5: Rooms & History | In Progress | `d9f8cef` | UC-006 (rooms done, history later) |
+| Phase 5: Rooms & History | In Progress | `d95f56f` | UC-006 (rooms done, history later) |
 | Phase 6: Agent Integration | Planned | — | UC-007 + UC-008 |
 
 ## Dependency Graph
