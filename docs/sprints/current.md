@@ -4,7 +4,7 @@
 
 Establish QUIC-based P2P connections between two TermChat instances. This is the first real networking sprint — previous sprints used loopback transports.
 
-## Status: Not Started
+## Status: Complete
 
 ## Prerequisites (all met)
 
@@ -17,7 +17,7 @@ Establish QUIC-based P2P connections between two TermChat instances. This is the
 
 | UC | Title | Status | Task Decomposition | Agent Team |
 |----|-------|--------|--------------------|------------|
-| UC-003 | Establish P2P Connection | Not started | Pending `/task-decompose` | Pending `/agent-team-plan` |
+| UC-003 | Establish P2P Connection | Done | `docs/tasks/uc-003-tasks.md` | `docs/teams/uc-003-team.md` |
 
 ## Rust Concepts to Learn
 
@@ -30,12 +30,16 @@ Per blueprint (Section 2.4):
 ## Process Checklist
 
 Before starting implementation:
-- [ ] Write UC-003 use case with `/uc-create`
-- [ ] Review UC-003 with `/uc-review`
-- [ ] Run `/task-decompose uc-003` to break into tasks
-- [ ] Run `/agent-team-plan uc-003` to design agent team
-- [ ] Get user approval on team plan
-- [ ] Spawn team and execute
+- [x] Write UC-003 use case with `/uc-create`
+- [x] Review UC-003 with `/uc-review`
+- [x] Fix 6 review issues (false dependency, missing accept flow, etc.)
+- [x] Run `/task-decompose uc-003` to break into tasks (14 tasks)
+- [x] Run `/agent-team-plan uc-003` to design agent team (3 agents)
+- [x] Get user approval on team plan
+- [x] Spawn team and execute (all 14 tasks complete)
+- [x] Gate 3: `cargo fmt --check && cargo clippy -- -D warnings && cargo test` — 190 tests pass
+- [x] Verification: `cargo test --test p2p_connection` — 10/10 pass
+- [x] Commit: `69e0f17`
 
 ## Previous Sprints
 

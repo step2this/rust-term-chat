@@ -7,6 +7,7 @@
 | UC-001 | Send Direct Message | User Goal | P0 | Sprint 1 | `d0ac08e` | 114 (unit + integration) |
 | UC-002 | Receive Direct Message | User Goal | P0 | Sprint 1 | `c2d368f` | 121 cumulative |
 | UC-005 | Establish E2E Handshake | Subfunction | P0 | Sprint 2 | `da5f397` | 149 cumulative |
+| UC-003 | Establish P2P Connection | User Goal | P1 | Sprint 3 | `69e0f17` | 190 cumulative |
 
 ## In Progress
 
@@ -16,7 +17,6 @@
 
 | UC | Title | Goal Level | Priority | Sprint | Depends On |
 |----|-------|------------|----------|--------|------------|
-| UC-003 | Establish P2P Connection | User Goal | P1 | Sprint 3 | UC-005 |
 | UC-004 | Relay Fallback | User Goal | P1 | Sprint 4 | UC-003 |
 | UC-006 | Create Room | User Goal | P2 | Sprint 5 | UC-001, UC-002 |
 | UC-007 | Agent Join Chat | User Goal | P2 | Sprint 6 | UC-006 |
@@ -41,5 +41,5 @@ UC-001 (Send) ─────┐
                     ├── UC-006 (Rooms) ── UC-007 (Agent Join) ── UC-008 (Tasks)
 UC-002 (Receive) ──┘
 
-UC-005 (E2E) ── UC-003 (P2P) ── UC-004 (Relay Fallback)
+UC-005 (E2E) ── UC-003 (P2P) ✓ ── UC-004 (Relay Fallback)
 ```
