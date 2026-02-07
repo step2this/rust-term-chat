@@ -54,6 +54,13 @@ pub enum RelayMessage {
         /// Human-readable error description.
         reason: String,
     },
+
+    /// A room protocol message (bincode-encoded [`RoomMessage`] bytes).
+    ///
+    /// Room messages are wrapped in this variant for relay transport.
+    /// The relay decodes the inner bytes as [`crate::room::RoomMessage`]
+    /// to handle registry operations and route join requests.
+    Room(Vec<u8>),
 }
 
 /// Encodes a [`RelayMessage`] into bytes using bincode.
@@ -149,6 +156,24 @@ mod tests {
     fn decode_empty_bytes_fails() {
         let result = decode(&[]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn round_trip_room() {
+        let inner = crate::room::RoomMessage::ListRooms;
+        let inner_bytes = crate::room::encode(&inner).unwrap();
+        let msg = RelayMessage::Room(inner_bytes.clone());
+        let bytes = encode(&msg).unwrap();
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(decoded, RelayMessage::Room(inner_bytes));
+    }
+
+    #[test]
+    fn round_trip_room_empty() {
+        let msg = RelayMessage::Room(vec![]);
+        let bytes = encode(&msg).unwrap();
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(msg, decoded);
     }
 
     #[test]

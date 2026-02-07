@@ -12,8 +12,10 @@ use std::sync::Arc;
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use termchat_proto::relay::{self, RelayMessage};
+use termchat_proto::room;
 use tokio::sync::{RwLock, mpsc};
 
+use crate::rooms::{self, RoomRegistry};
 use crate::store::MessageStore;
 
 /// Maximum allowed payload size in bytes (64 KB).
@@ -25,6 +27,8 @@ pub struct RelayState {
     connections: RwLock<HashMap<String, mpsc::UnboundedSender<Message>>>,
     /// Store-and-forward queue for offline peers.
     pub store: MessageStore,
+    /// Room directory for room discovery and join request routing.
+    pub rooms: RoomRegistry,
 }
 
 impl Default for RelayState {
@@ -39,6 +43,7 @@ impl RelayState {
         Self {
             connections: RwLock::new(HashMap::new()),
             store: MessageStore::new(),
+            rooms: RoomRegistry::new(),
         }
     }
 
@@ -273,6 +278,9 @@ async fn handle_binary_message(peer_id: &str, data: &[u8], state: &Arc<RelayStat
                 "received duplicate Register from already-registered peer"
             );
         }
+        RelayMessage::Room(room_bytes) => {
+            handle_room_message(peer_id, &room_bytes, state).await;
+        }
         other => {
             tracing::warn!(
                 peer_id = %peer_id,
@@ -280,6 +288,131 @@ async fn handle_binary_message(peer_id: &str, data: &[u8], state: &Arc<RelayStat
                 "unexpected message type from client"
             );
         }
+    }
+}
+
+/// Handles a room protocol message from a registered peer.
+async fn handle_room_message(peer_id: &str, room_bytes: &[u8], state: &Arc<RelayState>) {
+    let room_msg = match room::decode(room_bytes) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(peer_id = %peer_id, error = %e, "failed to decode room message");
+            return;
+        }
+    };
+
+    match room_msg {
+        room::RoomMessage::RegisterRoom {
+            room_id,
+            name,
+            admin_peer_id,
+        } => {
+            match state.rooms.register(&room_id, &name, &admin_peer_id).await {
+                Ok(()) => {
+                    tracing::info!(
+                        peer_id = %peer_id,
+                        room_id = %room_id,
+                        name = %name,
+                        "room registered"
+                    );
+                    // Echo back the RegisterRoom as confirmation.
+                    let confirm = room::RoomMessage::RegisterRoom {
+                        room_id,
+                        name,
+                        admin_peer_id,
+                    };
+                    send_room_to_peer(state, peer_id, &confirm).await;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        room_id = %room_id,
+                        error = %e,
+                        "room registration failed"
+                    );
+                    let err = RelayMessage::Error {
+                        reason: e.to_string(),
+                    };
+                    send_to_peer(state, peer_id, &err).await;
+                }
+            }
+        }
+        room::RoomMessage::UnregisterRoom { room_id } => {
+            let existed = state.rooms.unregister(&room_id).await;
+            tracing::info!(
+                peer_id = %peer_id,
+                room_id = %room_id,
+                existed = existed,
+                "room unregistered"
+            );
+        }
+        room::RoomMessage::ListRooms => {
+            let rooms = state.rooms.list().await;
+            let response = room::RoomMessage::RoomList { rooms };
+            send_room_to_peer(state, peer_id, &response).await;
+        }
+        room::RoomMessage::JoinRequest {
+            room_id,
+            peer_id: requester_id,
+            display_name,
+        } => {
+            if let Err(e) = rooms::route_join_request(
+                &state.rooms,
+                state,
+                &room_id,
+                &requester_id,
+                &display_name,
+            )
+            .await
+            {
+                tracing::warn!(
+                    peer_id = %peer_id,
+                    room_id = %room_id,
+                    error = %e,
+                    "join request routing failed"
+                );
+                let err = RelayMessage::Error {
+                    reason: e.to_string(),
+                };
+                send_to_peer(state, peer_id, &err).await;
+            }
+        }
+        room::RoomMessage::JoinApproved { ref room_id, .. } => {
+            // Forward to the peer who requested to join.
+            // The target peer_id needs to be inferred; for JoinApproved, the
+            // admin sends it and the relay must know who to route it to.
+            // The relay routes based on the room message content: JoinApproved
+            // is sent by the admin to a specific peer. We look at the member
+            // list to find non-admin members, but a cleaner approach is to
+            // just forward it. The calling client should send it via
+            // RelayPayload for targeted delivery. For now, log it.
+            tracing::debug!(
+                peer_id = %peer_id,
+                room_id = %room_id,
+                "received JoinApproved — should be sent via RelayPayload for targeted delivery"
+            );
+        }
+        room::RoomMessage::JoinDenied { ref room_id, .. } => {
+            tracing::debug!(
+                peer_id = %peer_id,
+                room_id = %room_id,
+                "received JoinDenied — should be sent via RelayPayload for targeted delivery"
+            );
+        }
+        room::RoomMessage::MembershipUpdate { .. } => {
+            // Client-to-client only; no relay action needed.
+        }
+        room::RoomMessage::RoomList { .. } => {
+            // Server-to-client only; ignore if received from client.
+        }
+    }
+}
+
+/// Encodes a room message and sends it to a peer as a `RelayMessage::Room`.
+async fn send_room_to_peer(state: &Arc<RelayState>, peer_id: &str, room_msg: &room::RoomMessage) {
+    if let Ok(room_bytes) = room::encode(room_msg) {
+        let relay_msg = RelayMessage::Room(room_bytes);
+        send_to_peer(state, peer_id, &relay_msg).await;
     }
 }
 

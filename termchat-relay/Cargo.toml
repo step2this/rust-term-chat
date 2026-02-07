@@ -11,6 +11,7 @@ bincode = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
 axum = { workspace = true, features = ["ws"] }
 futures-util = { workspace = true }
 tokio-tungstenite = { workspace = true }

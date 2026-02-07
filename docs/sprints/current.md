@@ -4,7 +4,7 @@
 
 Implement chat room creation, joining, and persistent message history. This begins Phase 5: Rooms & History.
 
-## Status: In Progress
+## Status: Complete
 
 ## Prerequisites (all met)
 
@@ -19,7 +19,7 @@ Implement chat room creation, joining, and persistent message history. This begi
 
 | UC | Title | Status | Task Decomposition | Agent Team |
 |----|-------|--------|--------------------|------------|
-| UC-006 | Create Room | In Progress | — | — |
+| UC-006 | Create Room | Done | `docs/tasks/uc-006-tasks.md` | `docs/teams/uc-006-team.md` |
 
 ## Rust Concepts to Learn
 
@@ -31,16 +31,16 @@ Per blueprint (Section 2.4):
 
 ## Process Checklist
 
-- [ ] Write UC-006 use case with `/uc-create`
-- [ ] Review UC-006 with `/uc-review`
-- [ ] Fix review issues
-- [ ] Run `/task-decompose uc-006` to break into tasks
-- [ ] Run `/agent-team-plan uc-006` to design agent team
-- [ ] Get user approval on team plan
-- [ ] Spawn team and execute
-- [ ] Quality gates
-- [ ] Verification
-- [ ] Commit
+- [x] Write UC-006 use case with `/uc-create`
+- [x] Review UC-006 with `/uc-review`
+- [x] Fix review issues
+- [x] Run `/task-decompose uc-006` to break into tasks
+- [x] Run `/agent-team-plan uc-006` to design agent team
+- [x] Get user approval on team plan
+- [x] Spawn team and execute
+- [x] Quality gates
+- [x] Verification
+- [x] Commit
 - [ ] Retrospective
 
 ## Previous Sprints

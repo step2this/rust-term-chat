@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project State
 
-Active development. Three-crate workspace is initialized and building. Completed: UC-001 (Send), UC-002 (Receive), UC-005 (E2E Handshake), UC-003 (P2P Connection), UC-004 (Relay Fallback), Phase 1 (Hello Ratatui TUI). 247 tests passing. Phase 4 (Hybrid Networking) complete. Sprint 5 in progress: UC-006 (Create Room).
+Active development. Three-crate workspace is initialized and building. Completed: UC-001 (Send), UC-002 (Receive), UC-005 (E2E Handshake), UC-003 (P2P Connection), UC-004 (Relay Fallback), UC-006 (Create Room), Phase 1 (Hello Ratatui TUI). 318 tests passing. Phase 5 (Rooms) complete.
 
 ## Build & Development Commands
 
@@ -14,11 +14,12 @@ Active development. Three-crate workspace is initialized and building. Completed
 cargo build
 cargo run                                # launch TUI client
 cargo run --bin termchat-relay           # relay server (ws://0.0.0.0:9000)
-cargo test                               # all tests (247)
+cargo test                               # all tests (318)
 cargo test --test send_receive           # UC-001/UC-002 integration test
 cargo test --test e2e_encryption         # UC-005 integration test
 cargo test --test p2p_connection         # UC-003 integration test
 cargo test --test relay_fallback         # UC-004 integration test
+cargo test --test room_management        # UC-006 integration test
 cargo test -p termchat-relay             # relay server unit tests
 cargo test --lib                         # unit tests only
 cargo test -p termchat-proto             # proto crate tests only
@@ -46,6 +47,7 @@ termchat/src/
   chat/
     mod.rs         # ChatManager: send/receive pipeline, ack tracking, events
     history.rs     # MessageStore trait, InMemoryStore, ResilientHistoryWriter
+    room.rs        # Room struct, RoomManager, RoomEvent, validate_room_name, join flow
   crypto/
     mod.rs         # CryptoSession trait, CryptoError
     noise.rs       # StubNoiseSession (testing) + NoiseHandshake + NoiseXXSession (real Noise XX)
@@ -59,14 +61,16 @@ termchat/src/
 
 termchat-relay/src/
   main.rs          # axum server entry point (configurable via RELAY_ADDR env)
-  relay.rs         # RelayState, WebSocket handler, peer registry, message routing
+  relay.rs         # RelayState, WebSocket handler, peer registry, message routing, room message dispatch
+  rooms.rs         # RoomRegistry: in-memory room directory, join request routing
   store.rs         # MessageStore: per-peer FIFO queues (1000 cap, eviction)
 
 termchat-proto/src/
   lib.rs           # Crate root
   message.rs       # Wire format types: ChatMessage, Envelope, DeliveryAck, Nack, etc.
   codec.rs         # Bincode encode/decode with length-prefix framing
-  relay.rs         # RelayMessage enum: Register, Registered, RelayPayload, Queued, Error
+  relay.rs         # RelayMessage enum: Register, Registered, RelayPayload, Queued, Error, Room
+  room.rs          # RoomMessage enum: RegisterRoom, UnregisterRoom, ListRooms, RoomList, JoinRequest, JoinApproved, JoinDenied, MembershipUpdate
 ```
 
 ### File Ownership (for agent teams)

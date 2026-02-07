@@ -5,6 +5,7 @@
 //! flow, message status tracking, and local history persistence.
 
 pub mod history;
+pub mod room;
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;

@@ -45,3 +45,7 @@ path = "../tests/integration/p2p_connection.rs"
 [[test]]
 name = "relay_fallback"
 path = "../tests/integration/relay_fallback.rs"
+
+[[test]]
+name = "room_management"
+path = "../tests/integration/room_management.rs"
