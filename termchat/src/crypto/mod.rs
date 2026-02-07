@@ -11,6 +11,7 @@
 //! UC-001 pipeline testing. The real Noise XX handshake implementation will
 //! replace it in UC-005.
 
+pub mod keys;
 pub mod noise;
 
 /// Errors that can occur during cryptographic operations.
@@ -29,6 +30,22 @@ pub enum CryptoError {
     /// Decryption failed (corrupted ciphertext, wrong key, or tampered data).
     #[error("decryption failed: {0}")]
     DecryptionFailed(String),
+
+    /// Handshake failed.
+    #[error("handshake failed: {0}")]
+    HandshakeFailed(String),
+
+    /// Key generation failed.
+    #[error("key generation failed: {0}")]
+    KeyGenerationFailed(String),
+
+    /// Peer identity verification failed (key changed).
+    #[error("peer identity verification failed — key has changed")]
+    IdentityVerificationFailed,
+
+    /// Handshake state error (wrong sequence of operations).
+    #[error("handshake state error: {0}")]
+    HandshakeStateError(String),
 }
 
 /// Trait for encrypting and decrypting message payloads.

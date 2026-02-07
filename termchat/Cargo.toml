@@ -12,6 +12,13 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+ratatui = "0.29"
+crossterm = "0.28"
+chrono = "0.4"
+snow = "0.9"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+zeroize = "1"
+rand = "0.8"
 
 [dev-dependencies]
 tokio = { workspace = true }
@@ -19,3 +26,7 @@ tokio = { workspace = true }
 [[test]]
 name = "send_receive"
 path = "../tests/integration/send_receive.rs"
+
+[[test]]
+name = "e2e_encryption"
+path = "../tests/integration/e2e_encryption.rs"

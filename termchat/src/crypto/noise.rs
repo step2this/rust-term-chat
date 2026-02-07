@@ -171,3 +171,220 @@ mod tests {
         assert!(!inactive.is_established());
     }
 }
+
+// ============================================================================
+// Real Noise XX Implementation (UC-005)
+// ============================================================================
+
+use super::keys::Identity;
+use std::sync::Mutex;
+
+/// State of the Noise XX handshake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandshakeState {
+    /// Handshake not started.
+    Idle,
+    /// Initiator sent message 1, waiting for message 2.
+    WaitingForMessage2,
+    /// Responder sent message 2, waiting for message 3.
+    WaitingForMessage3,
+    /// Handshake complete, session ready.
+    Complete,
+    /// Handshake failed.
+    Failed(String),
+}
+
+/// Manages the 3-message Noise XX handshake.
+pub struct NoiseHandshake {
+    handshake: snow::HandshakeState,
+    is_initiator: bool,
+    state: HandshakeState,
+}
+
+impl NoiseHandshake {
+    /// Create a new handshake as the initiator.
+    pub fn new_initiator(identity: &Identity) -> Result<Self, CryptoError> {
+        let params: snow::params::NoiseParams = "Noise_XX_25519_ChaChaPoly_BLAKE2s"
+            .parse()
+            .map_err(|e: snow::Error| CryptoError::HandshakeFailed(e.to_string()))?;
+
+        let builder = snow::Builder::new(params).local_private_key(identity.private_key());
+
+        let handshake = builder
+            .build_initiator()
+            .map_err(|e| CryptoError::HandshakeFailed(e.to_string()))?;
+
+        Ok(Self {
+            handshake,
+            is_initiator: true,
+            state: HandshakeState::Idle,
+        })
+    }
+
+    /// Create a new handshake as the responder.
+    pub fn new_responder(identity: &Identity) -> Result<Self, CryptoError> {
+        let params: snow::params::NoiseParams = "Noise_XX_25519_ChaChaPoly_BLAKE2s"
+            .parse()
+            .map_err(|e: snow::Error| CryptoError::HandshakeFailed(e.to_string()))?;
+
+        let builder = snow::Builder::new(params).local_private_key(identity.private_key());
+
+        let handshake = builder
+            .build_responder()
+            .map_err(|e| CryptoError::HandshakeFailed(e.to_string()))?;
+
+        Ok(Self {
+            handshake,
+            is_initiator: false,
+            state: HandshakeState::Idle,
+        })
+    }
+
+    /// Write the next handshake message.
+    pub fn write_message(&mut self, payload: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        if matches!(
+            self.state,
+            HandshakeState::Complete | HandshakeState::Failed(_)
+        ) {
+            return Err(CryptoError::HandshakeStateError(
+                "handshake already complete or failed".to_string(),
+            ));
+        }
+
+        let mut buf = vec![0u8; 65535];
+        let len = self
+            .handshake
+            .write_message(payload, &mut buf)
+            .map_err(|e| {
+                self.state = HandshakeState::Failed(e.to_string());
+                CryptoError::HandshakeFailed(e.to_string())
+            })?;
+        buf.truncate(len);
+
+        if self.handshake.is_handshake_finished() {
+            self.state = HandshakeState::Complete;
+        } else {
+            // Update state based on role
+            self.state = if self.is_initiator {
+                HandshakeState::WaitingForMessage2
+            } else {
+                HandshakeState::WaitingForMessage3
+            };
+        }
+
+        Ok(buf)
+    }
+
+    /// Read and process a received handshake message.
+    pub fn read_message(&mut self, message: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        if matches!(
+            self.state,
+            HandshakeState::Complete | HandshakeState::Failed(_)
+        ) {
+            return Err(CryptoError::HandshakeStateError(
+                "handshake already complete or failed".to_string(),
+            ));
+        }
+
+        let mut buf = vec![0u8; 65535];
+        let len = self
+            .handshake
+            .read_message(message, &mut buf)
+            .map_err(|e| {
+                self.state = HandshakeState::Failed(e.to_string());
+                CryptoError::HandshakeFailed(e.to_string())
+            })?;
+        buf.truncate(len);
+
+        if self.handshake.is_handshake_finished() {
+            self.state = HandshakeState::Complete;
+        }
+
+        Ok(buf)
+    }
+
+    /// Check if the handshake is complete.
+    pub fn is_complete(&self) -> bool {
+        self.state == HandshakeState::Complete
+    }
+
+    /// Get the current handshake state.
+    pub fn state(&self) -> &HandshakeState {
+        &self.state
+    }
+
+    /// Get the remote peer's static public key (available after message 2 for initiator, message 3 for responder).
+    pub fn remote_public_key(&self) -> Option<Vec<u8>> {
+        self.handshake.get_remote_static().map(|k| k.to_vec())
+    }
+
+    /// Transition to transport mode after handshake completion.
+    pub fn into_transport(self) -> Result<NoiseXXSession, CryptoError> {
+        if self.state != HandshakeState::Complete {
+            return Err(CryptoError::HandshakeStateError(
+                "handshake not complete".to_string(),
+            ));
+        }
+
+        let transport = self
+            .handshake
+            .into_transport_mode()
+            .map_err(|e| CryptoError::HandshakeFailed(e.to_string()))?;
+
+        Ok(NoiseXXSession {
+            transport: Mutex::new(transport),
+        })
+    }
+}
+
+/// A Noise XX session implementing the CryptoSession trait.
+///
+/// Created from a completed NoiseHandshake via `into_transport()`.
+/// Uses ChaCha20-Poly1305 AEAD for encryption/decryption.
+pub struct NoiseXXSession {
+    transport: Mutex<snow::TransportState>,
+}
+
+impl NoiseXXSession {
+    /// Get the remote peer's static public key.
+    pub fn remote_public_key(&self) -> Vec<u8> {
+        self.transport
+            .lock()
+            .unwrap()
+            .get_remote_static()
+            .map(|k| k.to_vec())
+            .unwrap_or_default()
+    }
+}
+
+impl CryptoSession for NoiseXXSession {
+    fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let mut buf = vec![0u8; plaintext.len() + 16]; // 16 bytes for AEAD tag
+        let mut transport = self
+            .transport
+            .lock()
+            .map_err(|e| CryptoError::EncryptionFailed(format!("lock poisoned: {e}")))?;
+        let len = transport
+            .write_message(plaintext, &mut buf)
+            .map_err(|e| CryptoError::EncryptionFailed(e.to_string()))?;
+        buf.truncate(len);
+        Ok(buf)
+    }
+
+    fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let mut buf = vec![0u8; ciphertext.len()];
+        let mut transport = self
+            .transport
+            .lock()
+            .map_err(|e| CryptoError::DecryptionFailed(format!("lock poisoned: {e}")))?;
+        let len = transport
+            .read_message(ciphertext, &mut buf)
+            .map_err(|e| CryptoError::DecryptionFailed(e.to_string()))?;
+        buf.truncate(len);
+        Ok(buf)
+    }
+
+    fn is_established(&self) -> bool {
+        true
+    }
+}
