@@ -1,41 +1,40 @@
-//! Relay wire protocol types for the TermChat relay server.
+//! Relay wire protocol types for the `TermChat` relay server.
 //!
-//! Defines the [`RelayMessage`] enum that is bincode-encoded and sent
+//! Defines the [`RelayMessage`] enum that is postcard-encoded and sent
 //! over WebSocket binary frames between relay clients and the relay server.
 
-use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
 /// Messages exchanged between relay clients and the relay server.
 ///
-/// The relay protocol is simple: clients register with a PeerId, then
-/// send/receive encrypted payloads routed by PeerId. The relay never
-/// inspects payload contents — it only reads routing metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+/// The relay protocol is simple: clients register with a `PeerId`, then
+/// send/receive encrypted payloads routed by `PeerId`. The relay never
+/// inspects payload contents -- it only reads routing metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RelayMessage {
-    /// Client registers its PeerId with the relay server.
+    /// Client registers its `PeerId` with the relay server.
     ///
     /// Must be the first message sent after WebSocket connection.
     /// Server responds with [`RelayMessage::Registered`] on success.
     Register {
-        /// The PeerId of the registering client.
+        /// The `PeerId` of the registering client.
         peer_id: String,
     },
 
     /// Server acknowledges successful registration.
     Registered {
-        /// The PeerId that was registered (echoed back for confirmation).
+        /// The `PeerId` that was registered (echoed back for confirmation).
         peer_id: String,
     },
 
     /// An encrypted payload to be relayed from one peer to another.
     ///
     /// The `from` field is overwritten by the relay server with the
-    /// sender's registered PeerId (server-side enforcement against spoofing).
+    /// sender's registered `PeerId` (server-side enforcement against spoofing).
     RelayPayload {
-        /// Sender's PeerId (server overwrites this with the registered PeerId).
+        /// Sender's `PeerId` (server overwrites this with the registered `PeerId`).
         from: String,
-        /// Recipient's PeerId (used by server for routing).
+        /// Recipient's `PeerId` (used by server for routing).
         to: String,
         /// Opaque encrypted payload bytes.
         payload: Vec<u8>,
@@ -43,7 +42,7 @@ pub enum RelayMessage {
 
     /// Server acknowledges that a message was queued for an offline recipient.
     Queued {
-        /// The PeerId of the offline recipient.
+        /// The `PeerId` of the offline recipient.
         to: String,
         /// Number of messages currently queued for this recipient.
         count: u32,
@@ -55,7 +54,7 @@ pub enum RelayMessage {
         reason: String,
     },
 
-    /// A room protocol message (bincode-encoded [`RoomMessage`] bytes).
+    /// A room protocol message (postcard-encoded [`RoomMessage`] bytes).
     ///
     /// Room messages are wrapped in this variant for relay transport.
     /// The relay decodes the inner bytes as [`crate::room::RoomMessage`]
@@ -63,18 +62,22 @@ pub enum RelayMessage {
     Room(Vec<u8>),
 }
 
-/// Encodes a [`RelayMessage`] into bytes using bincode.
+/// Encodes a [`RelayMessage`] into bytes using postcard.
+///
+/// # Errors
+///
+/// Returns an error string if serialization fails.
 pub fn encode(msg: &RelayMessage) -> Result<Vec<u8>, String> {
-    bincode::encode_to_vec(msg, bincode::config::standard())
-        .map_err(|e| format!("relay encode error: {e}"))
+    postcard::to_allocvec(msg).map_err(|e| format!("relay encode error: {e}"))
 }
 
-/// Decodes a [`RelayMessage`] from bytes using bincode.
+/// Decodes a [`RelayMessage`] from bytes using postcard.
+///
+/// # Errors
+///
+/// Returns an error string if deserialization fails.
 pub fn decode(bytes: &[u8]) -> Result<RelayMessage, String> {
-    let (msg, _len) =
-        bincode::decode_from_slice::<RelayMessage, _>(bytes, bincode::config::standard())
-            .map_err(|e| format!("relay decode error: {e}"))?;
-    Ok(msg)
+    postcard::from_bytes(bytes).map_err(|e| format!("relay decode error: {e}"))
 }
 
 #[cfg(test)]

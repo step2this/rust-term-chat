@@ -1,6 +1,6 @@
-//! Serialization and deserialization for the TermChat wire protocol.
+//! Serialization and deserialization for the `TermChat` wire protocol.
 //!
-//! Provides encode/decode functions using bincode, along with
+//! Provides encode/decode functions using postcard, along with
 //! length-prefix framing variants for stream-based transports.
 
 use crate::message::Envelope;
@@ -8,26 +8,30 @@ use crate::message::Envelope;
 /// Error type for codec encode/decode operations.
 #[derive(Debug, thiserror::Error)]
 pub enum CodecError {
-    /// Bincode serialization or deserialization failed.
-    #[error("bincode error: {0}")]
-    Bincode(String),
+    /// Serialization or deserialization failed.
+    #[error("serialization error: {0}")]
+    Serialization(String),
     /// Frame is incomplete or has an invalid length prefix.
     #[error("invalid frame: {0}")]
     InvalidFrame(String),
 }
 
-/// Encodes an [`Envelope`] into a byte vector using bincode.
+/// Encodes an [`Envelope`] into a byte vector using postcard.
+///
+/// # Errors
+///
+/// Returns `CodecError::Serialization` if the envelope cannot be serialized.
 pub fn encode(envelope: &Envelope) -> Result<Vec<u8>, CodecError> {
-    bincode::encode_to_vec(envelope, bincode::config::standard())
-        .map_err(|e| CodecError::Bincode(e.to_string()))
+    postcard::to_allocvec(envelope).map_err(|e| CodecError::Serialization(e.to_string()))
 }
 
-/// Decodes an [`Envelope`] from a byte slice using bincode.
+/// Decodes an [`Envelope`] from a byte slice using postcard.
+///
+/// # Errors
+///
+/// Returns `CodecError::Serialization` if the bytes cannot be deserialized.
 pub fn decode(bytes: &[u8]) -> Result<Envelope, CodecError> {
-    let (envelope, _len) =
-        bincode::decode_from_slice::<Envelope, _>(bytes, bincode::config::standard())
-            .map_err(|e| CodecError::Bincode(e.to_string()))?;
-    Ok(envelope)
+    postcard::from_bytes(bytes).map_err(|e| CodecError::Serialization(e.to_string()))
 }
 
 /// Encodes an [`Envelope`] with a 4-byte little-endian length prefix.
@@ -36,6 +40,11 @@ pub fn decode(bytes: &[u8]) -> Result<Envelope, CodecError> {
 ///
 /// This is suitable for stream-based transports (TCP, WebSocket) where
 /// message boundaries are not preserved by the transport layer.
+///
+/// # Errors
+///
+/// Returns `CodecError::Serialization` if the envelope cannot be serialized,
+/// or `CodecError::InvalidFrame` if the payload exceeds `u32::MAX` bytes.
 pub fn encode_framed(envelope: &Envelope) -> Result<Vec<u8>, CodecError> {
     let payload = encode(envelope)?;
     let len = u32::try_from(payload.len()).map_err(|_| {
@@ -56,6 +65,12 @@ pub fn encode_framed(envelope: &Envelope) -> Result<Vec<u8>, CodecError> {
 ///
 /// Returns the decoded envelope and the total number of bytes consumed
 /// from the input (including the 4-byte length prefix).
+///
+/// # Errors
+///
+/// Returns `CodecError::InvalidFrame` if the input is too short or the
+/// length prefix indicates more data than available, or
+/// `CodecError::Serialization` if the payload cannot be deserialized.
 pub fn decode_framed(bytes: &[u8]) -> Result<(Envelope, usize), CodecError> {
     if bytes.len() < 4 {
         return Err(CodecError::InvalidFrame(format!(

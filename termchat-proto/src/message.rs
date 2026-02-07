@@ -1,10 +1,9 @@
-//! Wire format message types for the TermChat protocol.
+//! Wire format message types for the `TermChat` protocol.
 //!
 //! All types in this module represent the on-the-wire format for messages
-//! exchanged between TermChat peers. They are designed to be serialized with
-//! bincode and encrypted before transmission.
+//! exchanged between `TermChat` peers. They are designed to be serialized with
+//! postcard and encrypted before transmission.
 
-use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -12,22 +11,25 @@ use uuid::Uuid;
 pub const MAX_MESSAGE_SIZE: usize = 64 * 1024;
 
 /// Unique identifier for a message, based on UUID v7 for time-ordering.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Encode, Decode)]
-pub struct MessageId(#[bincode(with_serde)] Uuid);
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MessageId(Uuid);
 
 impl MessageId {
     /// Creates a new time-ordered message identifier (UUID v7).
+    #[must_use]
     pub fn new() -> Self {
         Self(Uuid::now_v7())
     }
 
     /// Creates a `MessageId` from an existing UUID.
-    pub fn from_uuid(uuid: Uuid) -> Self {
+    #[must_use]
+    pub const fn from_uuid(uuid: Uuid) -> Self {
         Self(uuid)
     }
 
     /// Returns the inner UUID value.
-    pub fn as_uuid(&self) -> &Uuid {
+    #[must_use]
+    pub const fn as_uuid(&self) -> &Uuid {
         &self.0
     }
 }
@@ -45,16 +47,18 @@ impl std::fmt::Display for MessageId {
 }
 
 /// Identifies a message sender by their public key fingerprint.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SenderId(Vec<u8>);
 
 impl SenderId {
     /// Creates a new sender identity from a public key fingerprint.
-    pub fn new(fingerprint: Vec<u8>) -> Self {
+    #[must_use]
+    pub const fn new(fingerprint: Vec<u8>) -> Self {
         Self(fingerprint)
     }
 
     /// Returns the raw fingerprint bytes.
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
@@ -70,16 +74,18 @@ impl std::fmt::Display for SenderId {
 }
 
 /// Identifies a message recipient by their public key fingerprint.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RecipientId(Vec<u8>);
 
 impl RecipientId {
     /// Creates a new recipient identity from a public key fingerprint.
-    pub fn new(fingerprint: Vec<u8>) -> Self {
+    #[must_use]
+    pub const fn new(fingerprint: Vec<u8>) -> Self {
         Self(fingerprint)
     }
 
     /// Returns the raw fingerprint bytes.
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
@@ -95,22 +101,25 @@ impl std::fmt::Display for RecipientId {
 }
 
 /// Identifies a conversation (direct message thread or room).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Encode, Decode)]
-pub struct ConversationId(#[bincode(with_serde)] Uuid);
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ConversationId(Uuid);
 
 impl ConversationId {
     /// Creates a new conversation identifier (UUID v7).
+    #[must_use]
     pub fn new() -> Self {
         Self(Uuid::now_v7())
     }
 
     /// Creates a `ConversationId` from an existing UUID.
-    pub fn from_uuid(uuid: Uuid) -> Self {
+    #[must_use]
+    pub const fn from_uuid(uuid: Uuid) -> Self {
         Self(uuid)
     }
 
     /// Returns the inner UUID value.
-    pub fn as_uuid(&self) -> &Uuid {
+    #[must_use]
+    pub const fn as_uuid(&self) -> &Uuid {
         &self.0
     }
 }
@@ -128,28 +137,29 @@ impl std::fmt::Display for ConversationId {
 }
 
 /// Millisecond-precision UTC timestamp.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Encode, Decode,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Timestamp(u64);
 
 impl Timestamp {
     /// Creates a timestamp for the current instant.
+    #[must_use]
     pub fn now() -> Self {
         let millis = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock is before UNIX epoch")
-            .as_millis() as u64;
-        Self(millis)
+            .unwrap_or_default()
+            .as_millis();
+        Self(u64::try_from(millis).unwrap_or(u64::MAX))
     }
 
     /// Creates a timestamp from milliseconds since the UNIX epoch.
-    pub fn from_millis(millis: u64) -> Self {
+    #[must_use]
+    pub const fn from_millis(millis: u64) -> Self {
         Self(millis)
     }
 
     /// Returns the timestamp as milliseconds since the UNIX epoch.
-    pub fn as_millis(&self) -> u64 {
+    #[must_use]
+    pub const fn as_millis(&self) -> u64 {
         self.0
     }
 }
@@ -161,7 +171,7 @@ impl std::fmt::Display for Timestamp {
 }
 
 /// Content of a chat message.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageContent {
     /// Plain text message content.
     Text(String),
@@ -169,7 +179,7 @@ pub enum MessageContent {
 }
 
 /// Metadata attached to every chat message.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageMetadata {
     /// Unique identifier for this message.
     pub message_id: MessageId,
@@ -182,7 +192,7 @@ pub struct MessageMetadata {
 }
 
 /// A complete chat message with metadata and content, ready for serialization.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
     /// Message metadata (id, timestamp, sender, conversation).
     pub metadata: MessageMetadata,
@@ -211,7 +221,12 @@ impl ChatMessage {
     ///
     /// Checks that the content is non-empty and within the size limit
     /// ([`MAX_MESSAGE_SIZE`] = 64 KB).
-    pub fn validate(&self) -> Result<(), ValidationError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError::Empty`] if the message text is empty, or
+    /// [`ValidationError::TooLarge`] if it exceeds `MAX_MESSAGE_SIZE`.
+    pub const fn validate(&self) -> Result<(), ValidationError> {
         match &self.content {
             MessageContent::Text(text) => {
                 if text.is_empty() {
@@ -231,7 +246,7 @@ impl ChatMessage {
 }
 
 /// Tracks the delivery lifecycle of a message.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageStatus {
     /// Message created but not yet sent.
     Pending,
@@ -244,7 +259,7 @@ pub enum MessageStatus {
 }
 
 /// Acknowledgment that a message was received by the recipient.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeliveryAck {
     /// The ID of the message being acknowledged.
     pub message_id: MessageId,
@@ -253,7 +268,7 @@ pub struct DeliveryAck {
 }
 
 /// Negative acknowledgment indicating message processing failed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Nack {
     /// The ID of the message being negatively acknowledged.
     pub message_id: MessageId,
@@ -262,7 +277,7 @@ pub struct Nack {
 }
 
 /// Reason for a negative acknowledgment.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NackReason {
     /// Deserialization failed (unknown format or version).
     DeserializationFailed,
@@ -276,7 +291,7 @@ pub enum NackReason {
 ///
 /// Every message on the wire is wrapped in an `Envelope`, which allows
 /// the receiver to determine the message type before further processing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Envelope {
     /// A chat message from one peer to another.
     Chat(ChatMessage),
@@ -386,7 +401,7 @@ mod tests {
 
     // --- Validation tests (T-001-14) ---
 
-    /// Helper to create a ChatMessage with the given text content.
+    /// Helper to create a `ChatMessage` with the given text content.
     fn make_message(text: &str) -> ChatMessage {
         ChatMessage {
             metadata: MessageMetadata {

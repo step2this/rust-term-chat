@@ -2,7 +2,7 @@
 //!
 //! Maintains an in-memory directory of active rooms. Peers register rooms
 //! after creation, and other peers can discover them via `ListRooms`.
-//! The registry also routes `JoinRequest` messages to the room admin's PeerId.
+//! The registry also routes `JoinRequest` messages to the room admin's `PeerId`.
 //!
 //! Room entries are ephemeral — lost on relay restart, same as the peer registry.
 
@@ -26,7 +26,7 @@ pub struct RoomRegistryEntry {
     pub room_id: String,
     /// Human-readable room name.
     pub name: String,
-    /// PeerId of the room admin/creator.
+    /// `PeerId` of the room admin/creator.
     pub admin_peer_id: String,
     /// Current number of members.
     pub member_count: u32,
@@ -44,6 +44,9 @@ pub enum RegistryError {
     /// The specified room was not found.
     #[error("room not found")]
     RoomNotFound,
+    /// Failed to encode a protocol message.
+    #[error("encoding failed: {0}")]
+    EncodingFailed(String),
 }
 
 /// In-memory directory of registered rooms.
@@ -62,6 +65,7 @@ impl Default for RoomRegistry {
 
 impl RoomRegistry {
     /// Creates a new, empty room registry.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             rooms: RwLock::new(HashMap::new()),
@@ -72,6 +76,10 @@ impl RoomRegistry {
     ///
     /// Returns an error if a room with the same name (case-insensitive)
     /// already exists, or if the registry has reached its capacity limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError::NameConflict`] or [`RegistryError::CapacityReached`].
     pub async fn register(
         &self,
         room_id: &str,
@@ -100,6 +108,7 @@ impl RoomRegistry {
                 member_count: 1,
             },
         );
+        drop(rooms);
 
         Ok(())
     }
@@ -125,7 +134,7 @@ impl RoomRegistry {
             .collect()
     }
 
-    /// Returns the admin PeerId for a room, if the room exists.
+    /// Returns the admin `PeerId` for a room, if the room exists.
     pub async fn get_admin(&self, room_id: &str) -> Option<String> {
         let rooms = self.rooms.read().await;
         rooms.get(room_id).map(|e| e.admin_peer_id.clone())
@@ -142,7 +151,11 @@ impl RoomRegistry {
 ///
 /// If the admin is online, forwards the `JoinRequest` directly. If the admin
 /// is offline, queues the message for later delivery via store-and-forward.
-/// Returns `Err(RegistryError::RoomNotFound)` if the room does not exist.
+///
+/// # Errors
+///
+/// Returns [`RegistryError::RoomNotFound`] if the room does not exist, or
+/// [`RegistryError::EncodingFailed`] if the message cannot be serialized.
 pub async fn route_join_request(
     registry: &RoomRegistry,
     state: &Arc<RelayState>,
@@ -161,8 +174,8 @@ pub async fn route_join_request(
         display_name: display_name.to_string(),
     };
 
-    let room_bytes = room::encode(&join_msg).expect("JoinRequest encoding should not fail");
-    let relay_msg = RelayMessage::Room(room_bytes.clone());
+    let room_bytes = room::encode(&join_msg).map_err(RegistryError::EncodingFailed)?;
+    let relay_msg = RelayMessage::Room(room_bytes);
 
     if let Some(sender) = state.get_sender(&admin_peer_id).await {
         if let Ok(bytes) = relay::encode(&relay_msg) {
@@ -171,7 +184,7 @@ pub async fn route_join_request(
     } else {
         // Admin is offline — queue the room message bytes as payload
         // so the admin receives them on reconnect.
-        let relay_bytes = relay::encode(&relay_msg).expect("relay encoding should not fail");
+        let relay_bytes = relay::encode(&relay_msg).map_err(RegistryError::EncodingFailed)?;
         state
             .store
             .enqueue(&admin_peer_id, peer_id, relay_bytes)
@@ -181,7 +194,7 @@ pub async fn route_join_request(
     Ok(())
 }
 
-/// Routes a JoinApproved or JoinDenied message back to the target peer.
+/// Routes a `JoinApproved` or `JoinDenied` message back to the target peer.
 pub async fn route_room_message(state: &Arc<RelayState>, target_peer_id: &str, msg: &RoomMessage) {
     let room_bytes = match room::encode(msg) {
         Ok(b) => b,

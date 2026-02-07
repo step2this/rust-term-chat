@@ -150,15 +150,15 @@ proptest! {
         let _ = codec::decode_framed(&bytes);
     }
 
-    /// MessageStatus survives round-trip through Envelope encoding.
-    /// (MessageStatus is not in Envelope directly, but we test it can be
-    /// encoded/decoded through bincode independently.)
+    /// `MessageStatus` survives round-trip through postcard encoding.
+    /// (`MessageStatus` is not in `Envelope` directly, but we test it can be
+    /// encoded/decoded through postcard independently.)
     #[test]
-    fn message_status_bincode_round_trip(status in arb_message_status()) {
-        let bytes = bincode::encode_to_vec(&status, bincode::config::standard())
+    fn message_status_postcard_round_trip(status in arb_message_status()) {
+        let bytes = postcard::to_allocvec(&status)
             .expect("encode should succeed");
-        let (decoded, _): (MessageStatus, _) =
-            bincode::decode_from_slice(&bytes, bincode::config::standard())
+        let decoded: MessageStatus =
+            postcard::from_bytes(&bytes)
                 .expect("decode should succeed");
         prop_assert_eq!(status, decoded);
     }

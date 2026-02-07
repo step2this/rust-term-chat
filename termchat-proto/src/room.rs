@@ -1,18 +1,17 @@
-//! Room protocol wire types for TermChat room management.
+//! Room protocol wire types for `TermChat` room management.
 //!
 //! Defines the [`RoomMessage`] enum for room creation, discovery, joining,
-//! and membership updates. These messages are bincode-encoded and carried
-//! either directly over WebSocket (client ↔ relay) or embedded in
+//! and membership updates. These messages are postcard-encoded and carried
+//! either directly over WebSocket (client - relay) or embedded in
 //! [`RelayMessage::Room`] frames.
 
-use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
 /// Messages for room management operations.
 ///
 /// Room protocol messages handle the full lifecycle: creation, discovery,
 /// join requests, approval/denial, and membership change broadcasts.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RoomMessage {
     /// Register a room with the relay server's room directory.
     ///
@@ -22,7 +21,7 @@ pub enum RoomMessage {
         room_id: String,
         /// Human-readable room name.
         name: String,
-        /// PeerId of the room admin/creator.
+        /// `PeerId` of the room admin/creator.
         admin_peer_id: String,
     },
 
@@ -45,7 +44,7 @@ pub enum RoomMessage {
     JoinRequest {
         /// The room to join.
         room_id: String,
-        /// PeerId of the requesting peer.
+        /// `PeerId` of the requesting peer.
         peer_id: String,
         /// Display name of the requesting peer.
         display_name: String,
@@ -75,7 +74,7 @@ pub enum RoomMessage {
         room_id: String,
         /// What changed.
         action: MemberAction,
-        /// PeerId of the affected member.
+        /// `PeerId` of the affected member.
         peer_id: String,
         /// Display name of the affected member.
         display_name: String,
@@ -83,7 +82,7 @@ pub enum RoomMessage {
 }
 
 /// Summary info for room discovery via the relay directory.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomInfo {
     /// Unique room identifier.
     pub room_id: String,
@@ -94,9 +93,9 @@ pub struct RoomInfo {
 }
 
 /// Info about a room member.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemberInfo {
-    /// Member's PeerId.
+    /// Member's `PeerId`.
     pub peer_id: String,
     /// Member's display name.
     pub display_name: String,
@@ -105,7 +104,7 @@ pub struct MemberInfo {
 }
 
 /// What changed in a membership update.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MemberAction {
     /// A new member joined.
     Joined,
@@ -117,18 +116,22 @@ pub enum MemberAction {
     Demoted,
 }
 
-/// Encodes a [`RoomMessage`] into bytes using bincode.
+/// Encodes a [`RoomMessage`] into bytes using postcard.
+///
+/// # Errors
+///
+/// Returns an error string if serialization fails.
 pub fn encode(msg: &RoomMessage) -> Result<Vec<u8>, String> {
-    bincode::encode_to_vec(msg, bincode::config::standard())
-        .map_err(|e| format!("room encode error: {e}"))
+    postcard::to_allocvec(msg).map_err(|e| format!("room encode error: {e}"))
 }
 
-/// Decodes a [`RoomMessage`] from bytes using bincode.
+/// Decodes a [`RoomMessage`] from bytes using postcard.
+///
+/// # Errors
+///
+/// Returns an error string if deserialization fails.
 pub fn decode(bytes: &[u8]) -> Result<RoomMessage, String> {
-    let (msg, _len) =
-        bincode::decode_from_slice::<RoomMessage, _>(bytes, bincode::config::standard())
-            .map_err(|e| format!("room decode error: {e}"))?;
-    Ok(msg)
+    postcard::from_bytes(bytes).map_err(|e| format!("room decode error: {e}"))
 }
 
 #[cfg(test)]
