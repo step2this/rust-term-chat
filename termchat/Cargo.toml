@@ -19,6 +19,9 @@ snow = "0.9"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 zeroize = "1"
 rand = "0.8"
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = "0.13"
 
 [dev-dependencies]
 tokio = { workspace = true }
@@ -30,3 +33,7 @@ path = "../tests/integration/send_receive.rs"
 [[test]]
 name = "e2e_encryption"
 path = "../tests/integration/e2e_encryption.rs"
+
+[[test]]
+name = "p2p_connection"
+path = "../tests/integration/p2p_connection.rs"

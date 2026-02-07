@@ -3,11 +3,12 @@
 //! Defines the [`Transport`] trait that all transport implementations must satisfy.
 //! Concrete implementations include:
 //! - [`loopback::LoopbackTransport`] — in-process channel-based transport for testing
-//! - P2P via QUIC (UC-003, future)
+//! - [`quic::QuicTransport`] — QUIC-based P2P transport (UC-003)
 //! - WebSocket relay (UC-004, future)
 
 pub mod hybrid;
 pub mod loopback;
+pub mod quic;
 
 use std::fmt;
 
