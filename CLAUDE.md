@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project State
 
-Active development. Three-crate workspace is initialized and building. Completed: UC-001 (Send), UC-002 (Receive), UC-005 (E2E Handshake), UC-003 (P2P Connection), UC-004 (Relay Fallback), UC-006 (Create Room), Phase 1 (Hello Ratatui TUI). 318 tests passing. Phase 5 (Rooms) complete.
+Active development. Three-crate workspace is initialized and building. Completed: UC-001 (Send), UC-002 (Receive), UC-005 (E2E Handshake), UC-003 (P2P Connection), UC-004 (Relay Fallback), UC-006 (Create Room), Phase 1 (Hello Ratatui TUI). 340 tests passing. Phase 5 (Rooms) complete. Code quality sprint done: migrated bincode→postcard, eliminated all production unwrap/expect, fixed clippy pedantic.
 
 ## Build & Development Commands
 
@@ -14,7 +14,7 @@ Active development. Three-crate workspace is initialized and building. Completed
 cargo build
 cargo run                                # launch TUI client
 cargo run --bin termchat-relay           # relay server (ws://0.0.0.0:9000)
-cargo test                               # all tests (318)
+cargo test                               # all tests (340)
 cargo test --test send_receive           # UC-001/UC-002 integration test
 cargo test --test e2e_encryption         # UC-005 integration test
 cargo test --test p2p_connection         # UC-003 integration test
@@ -68,7 +68,7 @@ termchat-relay/src/
 termchat-proto/src/
   lib.rs           # Crate root
   message.rs       # Wire format types: ChatMessage, Envelope, DeliveryAck, Nack, etc.
-  codec.rs         # Bincode encode/decode with length-prefix framing
+  codec.rs         # Postcard encode/decode with length-prefix framing
   relay.rs         # RelayMessage enum: Register, Registered, RelayPayload, Queued, Error, Room
   room.rs          # RoomMessage enum: RegisterRoom, UnregisterRoom, ListRooms, RoomList, JoinRequest, JoinApproved, JoinDenied, MembershipUpdate
 ```
@@ -115,3 +115,6 @@ Cockburn-style use cases in `docs/use-cases/`. Always check the relevant use cas
 - Define shared proto types first, before spawning builder agents — they code against the same contract
 - Create `lib.rs` for any crate that integration tests need to import (e.g., `start_server()`)
 - Check transitive dependency versions before locking workspace deps (e.g., axum 0.8 requires tungstenite 0.28)
+- Serialization: use postcard (serde-only, no extra derives) over bincode. API: `postcard::to_allocvec()` / `postcard::from_bytes()`
+- Use parking_lot::Mutex instead of std::sync::Mutex — infallible lock(), no unwrap needed
+- When builders change function signatures (e.g., async→sync), integration test files may break — Lead must check cross-track test files in the integration gate
