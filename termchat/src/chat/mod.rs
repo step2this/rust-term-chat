@@ -1,4 +1,4 @@
-//! Chat application layer for TermChat.
+//! Chat application layer for `TermChat`.
 //!
 //! Contains the [`ChatManager`] which orchestrates the send pipeline
 //! (validate -> serialize -> encrypt -> transmit), delivery acknowledgment
@@ -280,6 +280,10 @@ impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
     ///
     /// If the initial send fails, retries up to `config.send_retries` times
     /// on the same transport before returning an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SendError`] if all retry attempts fail.
     pub async fn send_message_with_retry(
         &self,
         content: MessageContent,
@@ -307,7 +311,7 @@ impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
             }
         }
 
-        Err(last_err.expect("loop ran at least once"))
+        Err(last_err.unwrap_or_else(|| unreachable!("loop ran at least once")))
     }
 
     /// Wait for a delivery ack for a specific message, with timeout (Extension 7a).
@@ -373,6 +377,7 @@ impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
     /// Returns [`SendError`] if transport receive, decryption, or
     /// deserialization fails. Validation failures on the receive side
     /// result in the message being dropped silently or a NACK being sent.
+    #[allow(clippy::too_many_lines)]
     pub async fn receive_one(&self) -> Result<Envelope, SendError> {
         // Extension 1a: Check payload size before decryption
         let (from, encrypted) = self.transport.recv().await?;
@@ -444,7 +449,7 @@ impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
                 }
 
                 // Extension 6a: Check timestamp for clock skew
-                let has_clock_skew = self.check_timestamp_skew(&msg.metadata.timestamp);
+                let has_clock_skew = self.check_timestamp_skew(msg.metadata.timestamp);
 
                 // Step 7: Store in history (Extension 7a handled by ResilientHistoryWriter)
                 if let Some(ref history) = self.history {
@@ -527,7 +532,8 @@ impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
     /// For now, this is a simple comparison. In the real system with Noise,
     /// the peer ID would be derived from the Noise static public key and
     /// the sender ID would be the key fingerprint, so they should match.
-    fn sender_id_matches_peer(&self, sender_id: &SenderId, peer: &PeerId) -> bool {
+    #[allow(clippy::unused_self)]
+    const fn sender_id_matches_peer(&self, sender_id: &SenderId, peer: &PeerId) -> bool {
         // Placeholder: assume match for now. Real implementation would
         // compare the sender_id bytes with the peer's identity key fingerprint.
         // For testing with stub crypto, we skip validation.
@@ -538,7 +544,8 @@ impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
     /// Check if the timestamp is within acceptable clock skew tolerance.
     ///
     /// Returns `true` if the timestamp is outside the acceptable range.
-    fn check_timestamp_skew(&self, timestamp: &Timestamp) -> bool {
+    #[allow(clippy::unused_self)]
+    fn check_timestamp_skew(&self, timestamp: Timestamp) -> bool {
         let now = Timestamp::now();
         let diff = if timestamp.as_millis() > now.as_millis() {
             timestamp.as_millis() - now.as_millis()
@@ -554,17 +561,20 @@ impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
     }
 
     /// Returns a reference to the underlying transport.
-    pub fn transport(&self) -> &T {
+    #[must_use]
+    pub const fn transport(&self) -> &T {
         &self.transport
     }
 
     /// Returns a reference to the underlying crypto session.
-    pub fn crypto(&self) -> &C {
+    #[must_use]
+    pub const fn crypto(&self) -> &C {
         &self.crypto
     }
 
     /// Returns a reference to the history writer, if configured.
-    pub fn history(&self) -> Option<&ResilientHistoryWriter<S>> {
+    #[must_use]
+    pub const fn history(&self) -> Option<&ResilientHistoryWriter<S>> {
         self.history.as_ref()
     }
 

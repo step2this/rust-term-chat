@@ -1,4 +1,4 @@
-//! Room state management for TermChat.
+//! Room state management for `TermChat`.
 //!
 //! Contains the [`Room`] struct for room metadata and the [`RoomManager`]
 //! for tracking local rooms, handling join request queues, and fan-out
@@ -8,7 +8,7 @@
 //! # Room Lifecycle
 //!
 //! 1. Creator calls `RoomManager::create_room()` with a name
-//! 2. Manager validates the name, generates a RoomId, creates the Room
+//! 2. Manager validates the name, generates a `RoomId`, creates the Room
 //! 3. Manager sends `RegisterRoom` to relay for discovery
 //! 4. Other peers discover via `ListRooms` and send `JoinRequest`
 //! 5. Admin approves/denies via `approve_join()`/`deny_join()`
@@ -109,7 +109,7 @@ pub enum RoomEvent {
 }
 
 /// Local representation of a chat room.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Room {
     /// Unique room identifier (UUID v7).
     pub room_id: String,
@@ -132,9 +132,9 @@ pub struct Room {
 /// The application layer is responsible for wiring events to actual network
 /// operations.
 pub struct RoomManager {
-    /// All locally tracked rooms, keyed by room_id.
+    /// All locally tracked rooms, keyed by `room_id`.
     rooms: HashMap<String, Room>,
-    /// Pending join requests per room: room_id -> Vec<(peer_id, display_name)>.
+    /// Pending join requests per room: `room_id -> Vec<(peer_id, display_name)>`.
     pending_join_requests: HashMap<String, Vec<(String, String)>>,
     /// Room IDs queued for relay registration (when offline).
     pending_registrations: Vec<String>,
@@ -147,6 +147,7 @@ impl RoomManager {
     ///
     /// The caller should consume events from the returned receiver to
     /// drive UI updates and network operations.
+    #[must_use]
     pub fn new() -> (Self, mpsc::Receiver<RoomEvent>) {
         let (tx, rx) = mpsc::channel(256);
         let manager = Self {
@@ -187,14 +188,17 @@ impl RoomManager {
             return Err(RoomError::RoomLimitReached);
         }
 
-        let room_id = Uuid::now_v7().to_string();
-        let conversation_id =
-            ConversationId::from_uuid(Uuid::parse_str(&room_id).expect("just-created UUID"));
+        let room_uuid = Uuid::now_v7();
+        let room_id = room_uuid.to_string();
+        let conversation_id = ConversationId::from_uuid(room_uuid);
 
-        let now_millis = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock is before UNIX epoch")
-            .as_millis() as u64;
+        let now_millis = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+        )
+        .unwrap_or(u64::MAX);
 
         let admin_member = MemberInfo {
             peer_id: admin_peer_id.to_string(),
@@ -215,7 +219,7 @@ impl RoomManager {
 
         // Emit event (best-effort; if receiver is dropped, silently ignore)
         let _ = self.event_sender.try_send(RoomEvent::RoomCreated {
-            room_id: room_id.clone(),
+            room_id,
             name: sanitized,
         });
 
@@ -355,7 +359,7 @@ impl RoomManager {
         let room = self
             .rooms
             .get_mut(room_id)
-            .expect("room existence already checked");
+            .ok_or_else(|| RoomError::RoomNotFound(room_id.to_string()))?;
         room.members.push(new_member.clone());
         let members = room.members.clone();
 
@@ -391,12 +395,10 @@ impl RoomManager {
             .pending_join_requests
             .get_mut(room_id)
             .and_then(|queue| {
-                if let Some(pos) = queue.iter().position(|(pid, _)| pid == peer_id) {
+                queue.iter().position(|(pid, _)| pid == peer_id).map(|pos| {
                     let (_, name) = queue.remove(pos);
-                    Some(name)
-                } else {
-                    None
-                }
+                    name
+                })
             })
             .unwrap_or_else(|| peer_id.to_string());
 
@@ -412,6 +414,7 @@ impl RoomManager {
     ///
     /// Each entry is a `(peer_id, display_name)` tuple. Returns an empty
     /// vec if the room has no pending requests or doesn't exist.
+    #[must_use]
     pub fn pending_requests(&self, room_id: &str) -> Vec<(String, String)> {
         self.pending_join_requests
             .get(room_id)
@@ -446,11 +449,13 @@ impl RoomManager {
     /// Finds a room by its display name.
     ///
     /// Returns `None` if no room with the given name exists.
+    #[must_use]
     pub fn get_room_by_name(&self, name: &str) -> Option<&Room> {
         self.rooms.values().find(|r| r.name == name)
     }
 
     /// Returns a list of all locally tracked rooms.
+    #[must_use]
     pub fn list_rooms(&self) -> Vec<&Room> {
         self.rooms.values().collect()
     }
@@ -466,6 +471,11 @@ impl RoomManager {
 /// - Leading and trailing whitespace is trimmed
 ///
 /// Returns the sanitized name on success.
+///
+/// # Errors
+///
+/// Returns [`RoomError`] if the name is empty, too long, or contains only
+/// control characters.
 pub fn validate_room_name(name: &str) -> Result<String, RoomError> {
     if name.is_empty() {
         return Err(RoomError::NameEmpty);

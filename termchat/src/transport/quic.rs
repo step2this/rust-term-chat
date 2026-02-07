@@ -1,4 +1,4 @@
-//! QUIC-based P2P transport for TermChat (UC-003).
+//! QUIC-based P2P transport for `TermChat` (UC-003).
 //!
 //! Provides [`QuicTransport`], a [`Transport`] implementation using QUIC via
 //! the `quinn` crate, and [`QuicListener`] for accepting incoming connections.
@@ -33,6 +33,10 @@ const STREAM_INIT_MARKER: u8 = 0x01;
 ///
 /// Used for QUIC transport encryption only. Peer authentication happens
 /// via the Noise XX handshake (UC-005), not TLS certificates.
+///
+/// # Errors
+///
+/// Returns [`TransportError::Io`] if certificate generation fails.
 pub fn generate_self_signed_cert() -> Result<
     (
         rustls::pki_types::CertificateDer<'static>,
@@ -54,6 +58,10 @@ pub fn generate_self_signed_cert() -> Result<
 ///
 /// Uses the `ring` crypto provider (via quinn's built-in rustls integration)
 /// and presents the given certificate to connecting clients.
+///
+/// # Errors
+///
+/// Returns [`TransportError::Io`] if the TLS configuration fails.
 pub fn make_server_config(
     cert_der: rustls::pki_types::CertificateDer<'static>,
     key_der: rustls::pki_types::PrivatePkcs8KeyDer<'static>,
@@ -66,7 +74,11 @@ pub fn make_server_config(
     })?;
 
     // Enable keep-alive so stale connections are detected.
-    let transport = Arc::get_mut(&mut server_config.transport).expect("unique Arc");
+    let transport = Arc::get_mut(&mut server_config.transport).ok_or_else(|| {
+        TransportError::Io(std::io::Error::other(
+            "ServerConfig Arc unexpectedly shared",
+        ))
+    })?;
     transport.keep_alive_interval(Some(Duration::from_secs(15)));
 
     Ok(server_config)
@@ -76,6 +88,10 @@ pub fn make_server_config(
 ///
 /// QUIC TLS is for transport encryption only. Real peer authentication
 /// happens via the Noise XX handshake (UC-005).
+///
+/// # Errors
+///
+/// Returns [`TransportError::Io`] if the TLS configuration fails.
 pub fn make_client_config() -> Result<quinn::ClientConfig, TransportError> {
     let client_crypto = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
@@ -171,7 +187,7 @@ impl QuicListener {
     ///
     /// Returns [`TransportError::Io`] if the address cannot be bound or
     /// the TLS configuration fails.
-    pub async fn bind(addr: SocketAddr, local_id: PeerId) -> Result<Self, TransportError> {
+    pub fn bind(addr: SocketAddr, local_id: PeerId) -> Result<Self, TransportError> {
         let (cert_der, key_der) = generate_self_signed_cert()?;
         let server_config = make_server_config(cert_der, key_der)?;
         let endpoint = quinn::Endpoint::server(server_config, addr)?;
@@ -181,6 +197,10 @@ impl QuicListener {
     /// Return the local socket address this listener is bound to.
     ///
     /// Useful when binding to port 0 to discover the OS-assigned port.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransportError::Io`] if the address cannot be determined.
     pub fn local_addr(&self) -> Result<SocketAddr, TransportError> {
         self.endpoint.local_addr().map_err(TransportError::Io)
     }
@@ -293,6 +313,11 @@ impl QuicTransport {
     ///
     /// Same as [`connect`](QuicTransport::connect) but with an explicit
     /// timeout duration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransportError`] if the connection cannot be established
+    /// within the given timeout, or if the QUIC handshake fails.
     pub async fn connect_with_timeout(
         addr: SocketAddr,
         local_id: PeerId,
@@ -302,7 +327,7 @@ impl QuicTransport {
         let client_config = make_client_config()?;
 
         // Bind to an OS-assigned port for the client endpoint.
-        let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().expect("valid bind addr"))?;
+        let mut endpoint = quinn::Endpoint::client(SocketAddr::from(([0, 0, 0, 0], 0)))?;
         endpoint.set_default_client_config(client_config);
 
         let connecting = endpoint.connect(addr, "localhost").map_err(|e| {
@@ -319,7 +344,7 @@ impl QuicTransport {
                 })?
                 .map_err(|e| {
                     tracing::warn!(err = %e, addr = %addr, "QUIC handshake failed");
-                    map_connection_error(e, &remote_id)
+                    map_connection_error(&e, &remote_id)
                 })?;
 
         let (mut send_stream, recv_stream) = connection.open_bi().await.map_err(|e| {
@@ -350,12 +375,14 @@ impl QuicTransport {
     }
 
     /// Return the local peer ID.
-    pub fn local_id(&self) -> &PeerId {
+    #[must_use]
+    pub const fn local_id(&self) -> &PeerId {
         &self.local_id
     }
 
     /// Return the remote peer ID.
-    pub fn remote_id(&self) -> &PeerId {
+    #[must_use]
+    pub const fn remote_id(&self) -> &PeerId {
         &self.remote_id
     }
 }
@@ -366,7 +393,12 @@ impl Transport for QuicTransport {
             return Err(TransportError::Unreachable(peer.clone()));
         }
 
-        let len = payload.len() as u32;
+        let len = u32::try_from(payload.len()).map_err(|_| {
+            TransportError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "payload exceeds u32::MAX bytes",
+            ))
+        })?;
         let len_bytes = len.to_le_bytes();
 
         let mut stream = self.send_stream.lock().await;
@@ -378,6 +410,7 @@ impl Transport for QuicTransport {
             tracing::error!(err = %e, "QUIC send: failed to write payload");
             map_write_error(e)
         })?;
+        drop(stream);
 
         Ok(())
     }
@@ -411,6 +444,7 @@ impl Transport for QuicTransport {
             .read_exact(&mut payload)
             .await
             .map_err(map_read_exact_error)?;
+        drop(stream);
 
         Ok((self.remote_id.clone(), payload))
     }
@@ -429,7 +463,7 @@ impl Transport for QuicTransport {
 // ---------------------------------------------------------------------------
 
 /// Map a quinn `ConnectionError` to the appropriate `TransportError`.
-fn map_connection_error(err: quinn::ConnectionError, peer: &PeerId) -> TransportError {
+fn map_connection_error(err: &quinn::ConnectionError, peer: &PeerId) -> TransportError {
     match err {
         quinn::ConnectionError::TimedOut => TransportError::Timeout,
         quinn::ConnectionError::ConnectionClosed(_)
@@ -448,7 +482,7 @@ fn map_write_error(err: quinn::WriteError) -> TransportError {
         quinn::WriteError::ConnectionLost(_)
         | quinn::WriteError::ClosedStream
         | quinn::WriteError::Stopped(_) => TransportError::ConnectionClosed,
-        other => TransportError::Io(std::io::Error::new(
+        other @ quinn::WriteError::ZeroRttRejected => TransportError::Io(std::io::Error::new(
             std::io::ErrorKind::BrokenPipe,
             format!("QUIC write error: {other}"),
         )),
@@ -488,7 +522,6 @@ mod tests {
             "127.0.0.1:0".parse().expect("valid addr"),
             PeerId::new("responder"),
         )
-        .await
         .expect("listener bind");
 
         let addr = listener.local_addr().expect("local addr");
@@ -515,8 +548,7 @@ mod tests {
         let listener = QuicListener::bind(
             "127.0.0.1:0".parse().expect("valid addr"),
             PeerId::new("test"),
-        )
-        .await;
+        );
         assert!(listener.is_ok());
     }
 
@@ -526,7 +558,6 @@ mod tests {
             "127.0.0.1:0".parse().expect("valid addr"),
             PeerId::new("test"),
         )
-        .await
         .expect("bind");
 
         let addr = listener.local_addr().expect("local addr");
@@ -543,7 +574,6 @@ mod tests {
             "127.0.0.1:0".parse().expect("valid addr"),
             PeerId::new("responder"),
         )
-        .await
         .expect("bind");
 
         let addr = listener.local_addr().expect("local addr");
@@ -568,7 +598,6 @@ mod tests {
             "127.0.0.1:0".parse().expect("valid addr"),
             PeerId::new("test"),
         )
-        .await
         .expect("bind");
 
         listener.close();
@@ -614,7 +643,6 @@ mod tests {
             "127.0.0.1:0".parse().expect("valid addr"),
             PeerId::new("temp"),
         )
-        .await
         .expect("bind");
         let addr = listener.local_addr().expect("addr");
         listener.close();
@@ -838,7 +866,6 @@ mod tests {
             "127.0.0.1:0".parse().expect("valid addr"),
             PeerId::new("server"),
         )
-        .await
         .expect("bind");
 
         let addr = listener.local_addr().expect("local addr");
@@ -889,7 +916,6 @@ mod tests {
             "127.0.0.1:0".parse().expect("valid addr"),
             PeerId::new("responder"),
         )
-        .await
         .expect("bind");
 
         let addr = listener.local_addr().expect("local addr");
@@ -968,7 +994,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn connection_error_mapping_timeout() {
         let peer = PeerId::new("test");
-        let err = map_connection_error(quinn::ConnectionError::TimedOut, &peer);
+        let err = map_connection_error(&quinn::ConnectionError::TimedOut, &peer);
         assert!(
             matches!(err, TransportError::Timeout),
             "TimedOut should map to Timeout"
@@ -978,7 +1004,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn connection_error_mapping_locally_closed() {
         let peer = PeerId::new("test");
-        let err = map_connection_error(quinn::ConnectionError::LocallyClosed, &peer);
+        let err = map_connection_error(&quinn::ConnectionError::LocallyClosed, &peer);
         assert!(
             matches!(err, TransportError::ConnectionClosed),
             "LocallyClosed should map to ConnectionClosed"
@@ -988,7 +1014,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn connection_error_mapping_reset() {
         let peer = PeerId::new("test");
-        let err = map_connection_error(quinn::ConnectionError::Reset, &peer);
+        let err = map_connection_error(&quinn::ConnectionError::Reset, &peer);
         assert!(
             matches!(err, TransportError::ConnectionClosed),
             "Reset should map to ConnectionClosed"
@@ -998,7 +1024,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn connection_error_mapping_version_mismatch() {
         let peer = PeerId::new("test");
-        let err = map_connection_error(quinn::ConnectionError::VersionMismatch, &peer);
+        let err = map_connection_error(&quinn::ConnectionError::VersionMismatch, &peer);
         assert!(
             matches!(err, TransportError::Unreachable(_)),
             "VersionMismatch should map to Unreachable"
@@ -1008,7 +1034,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn connection_error_mapping_cids_exhausted() {
         let peer = PeerId::new("test");
-        let err = map_connection_error(quinn::ConnectionError::CidsExhausted, &peer);
+        let err = map_connection_error(&quinn::ConnectionError::CidsExhausted, &peer);
         assert!(
             matches!(err, TransportError::Unreachable(_)),
             "CidsExhausted should map to Unreachable"

@@ -15,7 +15,6 @@ async fn create_connected_pair() -> (QuicTransport, QuicTransport) {
         "127.0.0.1:0".parse().expect("valid addr"),
         PeerId::new("responder"),
     )
-    .await
     .expect("listener bind");
 
     let addr = listener.local_addr().expect("local addr");
@@ -210,7 +209,6 @@ async fn listener_accepts_multiple_connections_sequentially() {
         "127.0.0.1:0".parse().expect("valid addr"),
         PeerId::new("server"),
     )
-    .await
     .expect("bind");
 
     let addr = listener.local_addr().expect("local addr");

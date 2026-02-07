@@ -1,4 +1,4 @@
-//! Identity and key management for TermChat.
+//! Identity and key management for `TermChat`.
 //!
 //! This module provides long-term identity keypairs, key storage, and
 //! peer key caching for the Noise XX handshake.
@@ -7,7 +7,7 @@ use super::CryptoError;
 use std::collections::HashMap;
 use zeroize::ZeroizeOnDrop;
 
-/// A long-term identity keypair for a TermChat user.
+/// A long-term identity keypair for a `TermChat` user.
 ///
 /// This wraps a static x25519 keypair used in the Noise XX handshake.
 /// The private key is zeroized on drop to prevent key material from
@@ -67,6 +67,7 @@ impl Identity {
     /// Get the public key bytes.
     ///
     /// This is safe to share publicly and is used for peer verification.
+    #[must_use]
     pub fn public_key(&self) -> &[u8] {
         &self.public_key
     }
@@ -76,6 +77,7 @@ impl Identity {
     /// This is used internally for the Noise handshake and should never
     /// be exposed outside the crypto layer.
     #[allow(dead_code)]
+    #[must_use]
     pub(crate) fn private_key(&self) -> &[u8] {
         &self.private_key
     }
@@ -84,13 +86,14 @@ impl Identity {
     ///
     /// Returns a hex string of the first 8 bytes of the public key.
     /// This is used in the UI to show abbreviated peer identities.
+    #[must_use]
     pub fn fingerprint(&self) -> String {
+        use std::fmt::Write;
         let bytes = &self.public_key[..8.min(self.public_key.len())];
-        bytes
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<Vec<_>>()
-            .join("")
+        bytes.iter().fold(String::new(), |mut output, b| {
+            let _ = write!(output, "{b:02x}");
+            output
+        })
     }
 }
 
@@ -102,9 +105,18 @@ pub trait KeyStore: Send + Sync {
     /// Load an identity from storage.
     ///
     /// Returns `None` if no identity exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError`] if the stored key data is corrupted or
+    /// inaccessible.
     fn load(&self) -> Result<Option<Identity>, CryptoError>;
 
     /// Save an identity to storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError`] if the identity cannot be persisted.
     fn save(&self, identity: &Identity) -> Result<(), CryptoError>;
 }
 
@@ -112,14 +124,15 @@ pub trait KeyStore: Send + Sync {
 ///
 /// Does not persist keys beyond the lifetime of the struct.
 pub struct InMemoryKeyStore {
-    key: std::sync::Mutex<Option<Vec<u8>>>,
+    key: parking_lot::Mutex<Option<Vec<u8>>>,
 }
 
 impl InMemoryKeyStore {
     /// Create a new empty in-memory key store.
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self {
-            key: std::sync::Mutex::new(None),
+            key: parking_lot::Mutex::new(None),
         }
     }
 }
@@ -132,7 +145,7 @@ impl Default for InMemoryKeyStore {
 
 impl KeyStore for InMemoryKeyStore {
     fn load(&self) -> Result<Option<Identity>, CryptoError> {
-        let guard = self.key.lock().unwrap();
+        let guard = self.key.lock();
         match &*guard {
             Some(bytes) => Ok(Some(Identity::from_private_key(bytes)?)),
             None => Ok(None),
@@ -140,8 +153,7 @@ impl KeyStore for InMemoryKeyStore {
     }
 
     fn save(&self, identity: &Identity) -> Result<(), CryptoError> {
-        let mut guard = self.key.lock().unwrap();
-        *guard = Some(identity.private_key.clone());
+        *self.key.lock() = Some(identity.private_key.clone());
         Ok(())
     }
 }
@@ -152,14 +164,15 @@ impl KeyStore for InMemoryKeyStore {
 /// man-in-the-middle attack or key rotation).
 pub struct PeerKeyCache {
     /// Map from peer identifier to their public key.
-    cache: std::sync::Mutex<HashMap<String, Vec<u8>>>,
+    cache: parking_lot::Mutex<HashMap<String, Vec<u8>>>,
 }
 
 impl PeerKeyCache {
     /// Create a new empty peer key cache.
+    #[must_use]
     pub fn new() -> Self {
         Self {
-            cache: std::sync::Mutex::new(HashMap::new()),
+            cache: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
@@ -169,18 +182,20 @@ impl PeerKeyCache {
     /// - `Ok(true)` if the key matches the cached value
     /// - `Ok(false)` if this is the first time seeing this peer
     /// - `Err(IdentityVerificationFailed)` if the key has changed
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::IdentityVerificationFailed`] if the peer's
+    /// key has changed since it was last cached.
     pub fn verify(&self, peer_id: &str, public_key: &[u8]) -> Result<bool, CryptoError> {
-        let guard = self.cache.lock().unwrap();
-        match guard.get(peer_id) {
-            Some(cached_key) => {
-                if cached_key == public_key {
-                    Ok(true)
-                } else {
-                    Err(CryptoError::IdentityVerificationFailed)
-                }
+        let guard = self.cache.lock();
+        guard.get(peer_id).map_or(Ok(false), |cached_key| {
+            if cached_key == public_key {
+                Ok(true)
+            } else {
+                Err(CryptoError::IdentityVerificationFailed)
             }
-            None => Ok(false),
-        }
+        })
     }
 
     /// Store a peer's public key in the cache.
@@ -188,13 +203,14 @@ impl PeerKeyCache {
     /// This should be called after the first successful handshake with
     /// a peer, or after the user explicitly trusts a new key.
     pub fn store(&self, peer_id: String, public_key: Vec<u8>) {
-        let mut guard = self.cache.lock().unwrap();
+        let mut guard = self.cache.lock();
         guard.insert(peer_id, public_key);
     }
 
     /// Get a peer's cached public key.
+    #[must_use]
     pub fn get(&self, peer_id: &str) -> Option<Vec<u8>> {
-        let guard = self.cache.lock().unwrap();
+        let guard = self.cache.lock();
         guard.get(peer_id).cloned()
     }
 }
