@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project State
 
-Active development. Three-crate workspace is initialized and building. Completed: UC-001 (Send), UC-002 (Receive), UC-005 (E2E Handshake), UC-003 (P2P Connection), UC-004 (Relay Fallback), Phase 1 (Hello Ratatui TUI). 247 tests passing. Phase 4 (Hybrid Networking) complete. Next: UC-006 (Create Room).
+Active development. Three-crate workspace is initialized and building. Completed: UC-001 (Send), UC-002 (Receive), UC-005 (E2E Handshake), UC-003 (P2P Connection), UC-004 (Relay Fallback), Phase 1 (Hello Ratatui TUI). 247 tests passing. Phase 4 (Hybrid Networking) complete. Sprint 5 in progress: UC-006 (Create Room).
 
 ## Build & Development Commands
 

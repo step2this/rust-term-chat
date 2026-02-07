@@ -12,13 +12,11 @@
 
 ## In Progress
 
-*None*
-
-## Planned
-
 | UC | Title | Goal Level | Priority | Sprint | Depends On |
 |----|-------|------------|----------|--------|------------|
 | UC-006 | Create Room | User Goal | P2 | Sprint 5 | UC-001, UC-002 |
+
+## Planned
 | UC-007 | Agent Join Chat | User Goal | P2 | Sprint 6 | UC-006 |
 | UC-008 | Shared Task List | User Goal | P3 | Sprint 7 | UC-007 |
 
