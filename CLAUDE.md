@@ -106,3 +106,6 @@ Cockburn-style use cases in `docs/use-cases/`. Always check the relevant use cas
 - Stubbed implementations (e.g., StubNoiseSession) enable incremental progress across UCs
 - Agent reliability requires small tasks (~15-20 tool calls max per agent)
 - The reviewer role is non-negotiable: blind testing against postconditions catches real bugs
+- Define shared proto types first, before spawning builder agents — they code against the same contract
+- Create `lib.rs` for any crate that integration tests need to import (e.g., `start_server()`)
+- Check transitive dependency versions before locking workspace deps (e.g., axum 0.8 requires tungstenite 0.28)

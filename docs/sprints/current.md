@@ -50,6 +50,7 @@ Per blueprint (Section 2.4):
 - [x] Gate 3: `cargo fmt --check && cargo clippy -- -D warnings && cargo test` (247 tests)
 - [x] Verification: `cargo test --test relay_fallback` (15 tests)
 - [x] Commit
+- [x] Retrospective: `docs/retrospectives/sprint4-uc004.md`
 
 ## Previous Sprints
 
@@ -59,3 +60,4 @@ Per blueprint (Section 2.4):
 | Sprint 1 | UC-001, UC-002 | Done | `docs/retrospectives/phase0-uc001-uc005.md` |
 | Sprint 2 | UC-005, Phase 1 TUI | Done | `docs/retrospectives/phase0-uc001-uc005.md` |
 | Sprint 3 | UC-003 | Done | — |
+| Sprint 4 | UC-004 | Done | `docs/retrospectives/sprint4-uc004.md` |
