@@ -4,10 +4,13 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 termchat-proto = { path = "../termchat-proto" }
 serde = { workspace = true }
-bincode = { workspace = true }
+postcard = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
