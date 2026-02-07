@@ -47,22 +47,19 @@ impl LoopbackTransport {
     /// assert_eq!(data, b"hello");
     /// # }
     /// ```
-    pub fn create_pair(
-        id_a: PeerId,
-        id_b: PeerId,
-        buffer: usize,
-    ) -> (LoopbackTransport, LoopbackTransport) {
+    #[must_use]
+    pub fn create_pair(id_a: PeerId, id_b: PeerId, buffer: usize) -> (Self, Self) {
         let (tx_a, rx_a) = mpsc::channel(buffer);
         let (tx_b, rx_b) = mpsc::channel(buffer);
 
-        let a = LoopbackTransport {
+        let a = Self {
             local_id: id_a.clone(),
             remote_id: id_b.clone(),
             tx: tx_b, // A sends into B's receiver
             rx: Mutex::new(rx_a),
         };
 
-        let b = LoopbackTransport {
+        let b = Self {
             local_id: id_b,
             remote_id: id_a,
             tx: tx_a, // B sends into A's receiver

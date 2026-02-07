@@ -2,7 +2,7 @@
 //! message routing.
 //!
 //! The relay server accepts WebSocket connections, registers peers by their
-//! [`PeerId`], and routes encrypted payloads between them. When a recipient is
+//! `PeerId`, and routes encrypted payloads between them. When a recipient is
 //! offline, messages are stored in a [`MessageStore`] and delivered when the
 //! peer reconnects.
 
@@ -23,7 +23,7 @@ const MAX_PAYLOAD_SIZE: usize = 64 * 1024;
 
 /// Shared relay server state holding the peer registry and message store.
 pub struct RelayState {
-    /// Maps PeerId to a channel sender for delivering WebSocket messages.
+    /// Maps `PeerId` to a channel sender for delivering WebSocket messages.
     connections: RwLock<HashMap<String, mpsc::UnboundedSender<Message>>>,
     /// Store-and-forward queue for offline peers.
     pub store: MessageStore,
@@ -39,6 +39,7 @@ impl Default for RelayState {
 
 impl RelayState {
     /// Creates a new relay state with empty peer registry and message store.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             connections: RwLock::new(HashMap::new()),
@@ -86,12 +87,9 @@ pub async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
     // Wait for the Register message.
-    let peer_id = match wait_for_register(&mut ws_receiver).await {
-        Some(id) => id,
-        None => {
-            tracing::warn!("connection closed before registration");
-            return;
-        }
+    let Some(peer_id) = wait_for_register(&mut ws_receiver).await else {
+        tracing::warn!("connection closed before registration");
+        return;
     };
 
     tracing::info!(peer_id = %peer_id, "peer registering");
@@ -217,7 +215,6 @@ async fn wait_for_register(
             Message::Close(_) => return None,
             _ => {
                 // Skip non-binary frames (ping/pong) during registration.
-                continue;
             }
         }
     }
@@ -258,7 +255,7 @@ async fn handle_binary_message(peer_id: &str, data: &[u8], state: &Arc<RelayStat
                 return;
             }
 
-            // Server-side PeerId enforcement (ext 11a): override `from` with
+            // Server-side `PeerId` enforcement (ext 11a): override `from` with
             // the registered peer_id to prevent spoofing.
             let enforced_from = peer_id.to_string();
 
@@ -292,6 +289,7 @@ async fn handle_binary_message(peer_id: &str, data: &[u8], state: &Arc<RelayStat
 }
 
 /// Handles a room protocol message from a registered peer.
+#[allow(clippy::too_many_lines)]
 async fn handle_room_message(peer_id: &str, room_bytes: &[u8], state: &Arc<RelayState>) {
     let room_msg = match room::decode(room_bytes) {
         Ok(m) => m,
@@ -399,11 +397,8 @@ async fn handle_room_message(peer_id: &str, room_bytes: &[u8], state: &Arc<Relay
                 "received JoinDenied — should be sent via RelayPayload for targeted delivery"
             );
         }
-        room::RoomMessage::MembershipUpdate { .. } => {
-            // Client-to-client only; no relay action needed.
-        }
-        room::RoomMessage::RoomList { .. } => {
-            // Server-to-client only; ignore if received from client.
+        room::RoomMessage::MembershipUpdate { .. } | room::RoomMessage::RoomList { .. } => {
+            // Client-to-client or server-to-client only; no relay action needed.
         }
     }
 }
@@ -478,6 +473,10 @@ async fn send_relay_msg(
 /// and a join handle.
 ///
 /// This is the primary entry point used by both `main.rs` and test code.
+///
+/// # Errors
+///
+/// Returns an error if the TCP listener cannot bind to the given address.
 pub async fn start_server(
     addr: &str,
 ) -> Result<

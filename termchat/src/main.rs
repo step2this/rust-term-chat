@@ -1,4 +1,4 @@
-//! TermChat — terminal-native encrypted messenger.
+//! `TermChat` — terminal-native encrypted messenger.
 
 use std::io;
 

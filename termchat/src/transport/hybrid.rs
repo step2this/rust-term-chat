@@ -37,6 +37,7 @@ pub struct PendingQueue {
 
 impl PendingQueue {
     /// Create a new, empty pending queue.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             queue: Mutex::new(VecDeque::new()),
@@ -108,6 +109,7 @@ pub struct HybridTransport<P: Transport, F: Transport> {
 
 impl<P: Transport, F: Transport> HybridTransport<P, F> {
     /// Create a new hybrid transport with the given preferred and fallback.
+    #[must_use]
     pub fn new(preferred: P, fallback: F) -> Self {
         Self {
             preferred,

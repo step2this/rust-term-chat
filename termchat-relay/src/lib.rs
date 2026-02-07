@@ -1,4 +1,4 @@
-//! TermChat Relay Server library.
+//! `TermChat` Relay Server library.
 //!
 //! Exposes the relay server for use in tests and embedding.
 //! The relay server accepts WebSocket connections, registers peers,

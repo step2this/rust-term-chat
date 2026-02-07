@@ -1,4 +1,4 @@
-//! TermChat — terminal-native encrypted messenger library.
+//! `TermChat` — terminal-native encrypted messenger library.
 
 pub mod app;
 pub mod chat;

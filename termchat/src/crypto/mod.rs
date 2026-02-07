@@ -1,4 +1,4 @@
-//! Cryptographic session layer for TermChat.
+//! Cryptographic session layer for `TermChat`.
 //!
 //! Defines the [`CryptoSession`] trait for encrypt/decrypt operations and
 //! error types. The trait is the **only** boundary where plaintext exists —
@@ -67,12 +67,20 @@ pub trait CryptoSession: Send + Sync {
     ///
     /// The returned bytes must be safe to transmit over the network.
     /// They must differ from the input plaintext.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError`] if encryption fails.
     fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError>;
 
     /// Decrypt a ciphertext payload, recovering the original plaintext.
     ///
     /// Returns an error if the ciphertext is corrupted, tampered with,
     /// or was encrypted with a different key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError`] if decryption fails.
     fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError>;
 
     /// Returns `true` if this session has completed the handshake and

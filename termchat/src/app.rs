@@ -43,13 +43,13 @@ pub enum MessageStatus {
 
 impl MessageStatus {
     /// Get the display symbol for this status.
-    pub fn symbol(&self) -> &'static str {
+    #[must_use]
+    pub const fn symbol(&self) -> &'static str {
         match self {
-            MessageStatus::Sending => "⋯",
-            MessageStatus::Sent => "✓",
-            MessageStatus::Delivered => "✓✓",
-            MessageStatus::Read => "✓✓",
-            MessageStatus::Failed => "✗",
+            Self::Sending => "\u{22ef}",
+            Self::Sent => "\u{2713}",
+            Self::Delivered | Self::Read => "\u{2713}\u{2713}",
+            Self::Failed => "\u{2717}",
         }
     }
 }
@@ -87,6 +87,7 @@ pub struct App {
 
 impl App {
     /// Create a new application with demo data.
+    #[must_use]
     pub fn new() -> Self {
         let conversations = vec![
             ConversationItem {
@@ -194,7 +195,7 @@ impl App {
                 self.cycle_focus_backward();
                 return;
             }
-            (KeyCode::Tab, _) | (KeyCode::BackTab, _) => {
+            (KeyCode::Tab | KeyCode::BackTab, _) => {
                 self.cycle_focus_forward();
                 return;
             }
@@ -224,7 +225,7 @@ impl App {
     }
 
     /// Handle key event when sidebar is focused.
-    fn handle_sidebar_key(&mut self, key: KeyEvent) {
+    const fn handle_sidebar_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => self.prev_conversation(),
             KeyCode::Down | KeyCode::Char('j') => self.next_conversation(),
@@ -233,7 +234,7 @@ impl App {
     }
 
     /// Handle key event when chat is focused.
-    fn handle_chat_key(&mut self, key: KeyEvent) {
+    const fn handle_chat_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => self.scroll_up(),
             KeyCode::Down | KeyCode::Char('j') => self.scroll_down(),
@@ -241,8 +242,8 @@ impl App {
         }
     }
 
-    /// Cycle focus forward: Input → Sidebar → Chat → Input.
-    fn cycle_focus_forward(&mut self) {
+    /// Cycle focus forward: Input -> Sidebar -> Chat -> Input.
+    const fn cycle_focus_forward(&mut self) {
         self.focus = match self.focus {
             PanelFocus::Input => PanelFocus::Sidebar,
             PanelFocus::Sidebar => PanelFocus::Chat,
@@ -250,8 +251,8 @@ impl App {
         };
     }
 
-    /// Cycle focus backward: Input → Chat → Sidebar → Input.
-    fn cycle_focus_backward(&mut self) {
+    /// Cycle focus backward: Input -> Chat -> Sidebar -> Input.
+    const fn cycle_focus_backward(&mut self) {
         self.focus = match self.focus {
             PanelFocus::Input => PanelFocus::Chat,
             PanelFocus::Chat => PanelFocus::Sidebar,
@@ -295,42 +296,42 @@ impl App {
     }
 
     /// Move cursor left.
-    fn move_cursor_left(&mut self) {
+    const fn move_cursor_left(&mut self) {
         if self.cursor_position > 0 {
             self.cursor_position -= 1;
         }
     }
 
     /// Move cursor right.
-    fn move_cursor_right(&mut self) {
+    const fn move_cursor_right(&mut self) {
         if self.cursor_position < self.input.len() {
             self.cursor_position += 1;
         }
     }
 
     /// Scroll message list up.
-    fn scroll_up(&mut self) {
+    const fn scroll_up(&mut self) {
         if self.message_scroll > 0 {
             self.message_scroll -= 1;
         }
     }
 
     /// Scroll message list down.
-    fn scroll_down(&mut self) {
+    const fn scroll_down(&mut self) {
         if self.message_scroll < self.messages.len().saturating_sub(1) {
             self.message_scroll += 1;
         }
     }
 
     /// Select the previous conversation.
-    fn prev_conversation(&mut self) {
+    const fn prev_conversation(&mut self) {
         if self.selected_conversation > 0 {
             self.selected_conversation -= 1;
         }
     }
 
     /// Select the next conversation.
-    fn next_conversation(&mut self) {
+    const fn next_conversation(&mut self) {
         if self.selected_conversation < self.conversations.len().saturating_sub(1) {
             self.selected_conversation += 1;
         }

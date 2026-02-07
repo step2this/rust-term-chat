@@ -1,11 +1,11 @@
-//! WebSocket relay transport for TermChat (UC-004).
+//! WebSocket relay transport for `TermChat` (UC-004).
 //!
 //! Implements the [`Transport`] trait over a WebSocket connection to a
 //! relay server. Used as the fallback transport in [`super::hybrid::HybridTransport`]
 //! when P2P (QUIC) connections are unavailable.
 //!
 //! The relay server never sees plaintext — only opaque encrypted payloads
-//! are forwarded, identified by PeerId for routing.
+//! are forwarded, identified by `PeerId` for routing.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,7 +40,7 @@ const REGISTER_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// Connects to a relay server over WebSocket and sends/receives encrypted
 /// payloads routed by [`PeerId`]. The relay server never inspects payloads —
-/// it only uses the PeerId metadata for routing.
+/// it only uses the `PeerId` metadata for routing.
 ///
 /// Created via [`RelayTransport::connect`], which establishes the WebSocket
 /// connection, registers with the relay, and spawns a background reader task.
@@ -185,12 +185,14 @@ impl RelayTransport {
     }
 
     /// Return the relay server URL this transport is connected to.
+    #[must_use]
     pub fn relay_url(&self) -> &str {
         &self.relay_url
     }
 
     /// Return the local peer ID.
-    pub fn local_id(&self) -> &PeerId {
+    #[must_use]
+    pub const fn local_id(&self) -> &PeerId {
         &self.local_id
     }
 }
@@ -218,8 +220,9 @@ impl Transport for RelayTransport {
         let bytes =
             relay::encode(&msg).map_err(|e| TransportError::Io(std::io::Error::other(e)))?;
 
-        let mut sender = self.ws_sender.lock().await;
-        sender
+        self.ws_sender
+            .lock()
+            .await
             .send(Message::Binary(bytes.into()))
             .await
             .map_err(|e| {
@@ -307,11 +310,8 @@ async fn reader_loop(
                 tracing::info!("relay WebSocket closed by server");
                 break;
             }
-            Ok(Message::Ping(_)) | Ok(Message::Pong(_)) | Ok(Message::Text(_)) => {
-                // Ignore ping/pong/text frames.
-            }
-            Ok(Message::Frame(_)) => {
-                // Raw frame — ignore.
+            Ok(Message::Ping(_) | Message::Pong(_) | Message::Text(_) | Message::Frame(_)) => {
+                // Ignore ping/pong/text/raw frames.
             }
             Err(e) => {
                 tracing::warn!(err = %e, "relay WebSocket read error");

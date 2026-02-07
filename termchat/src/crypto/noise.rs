@@ -18,8 +18,6 @@ use super::{CryptoError, CryptoSession};
 
 /// A fixed 32-byte key used by the stub for repeating-key XOR.
 ///
-/// # Safety
-///
 /// This provides **zero** cryptographic security. It only ensures that
 /// `encrypt(data) != data` for testing the invariant that plaintext
 /// never appears on the wire.
@@ -53,7 +51,8 @@ impl StubNoiseSession {
     /// encrypt/decrypt. If `false`, all operations will return
     /// [`CryptoError::NoSession`] until a handshake is performed.
     // TODO: Replace with real Noise XX in UC-005
-    pub fn new(established: bool) -> Self {
+    #[must_use]
+    pub const fn new(established: bool) -> Self {
         Self { established }
     }
 }
@@ -177,7 +176,7 @@ mod tests {
 // ============================================================================
 
 use super::keys::Identity;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 /// State of the Noise XX handshake.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,6 +202,10 @@ pub struct NoiseHandshake {
 
 impl NoiseHandshake {
     /// Create a new handshake as the initiator.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::HandshakeFailed`] if the Noise builder fails.
     pub fn new_initiator(identity: &Identity) -> Result<Self, CryptoError> {
         let params: snow::params::NoiseParams = "Noise_XX_25519_ChaChaPoly_BLAKE2s"
             .parse()
@@ -222,6 +225,10 @@ impl NoiseHandshake {
     }
 
     /// Create a new handshake as the responder.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::HandshakeFailed`] if the Noise builder fails.
     pub fn new_responder(identity: &Identity) -> Result<Self, CryptoError> {
         let params: snow::params::NoiseParams = "Noise_XX_25519_ChaChaPoly_BLAKE2s"
             .parse()
@@ -241,6 +248,12 @@ impl NoiseHandshake {
     }
 
     /// Write the next handshake message.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::HandshakeStateError`] if the handshake is
+    /// already complete or failed, or [`CryptoError::HandshakeFailed`]
+    /// if the underlying Noise operation fails.
     pub fn write_message(&mut self, payload: &[u8]) -> Result<Vec<u8>, CryptoError> {
         if matches!(
             self.state,
@@ -276,6 +289,12 @@ impl NoiseHandshake {
     }
 
     /// Read and process a received handshake message.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::HandshakeStateError`] if the handshake is
+    /// already complete or failed, or [`CryptoError::HandshakeFailed`]
+    /// if the underlying Noise operation fails.
     pub fn read_message(&mut self, message: &[u8]) -> Result<Vec<u8>, CryptoError> {
         if matches!(
             self.state,
@@ -304,21 +323,30 @@ impl NoiseHandshake {
     }
 
     /// Check if the handshake is complete.
+    #[must_use]
     pub fn is_complete(&self) -> bool {
         self.state == HandshakeState::Complete
     }
 
     /// Get the current handshake state.
-    pub fn state(&self) -> &HandshakeState {
+    #[must_use]
+    pub const fn state(&self) -> &HandshakeState {
         &self.state
     }
 
-    /// Get the remote peer's static public key (available after message 2 for initiator, message 3 for responder).
+    /// Get the remote peer's static public key (available after message 2 for
+    /// initiator, message 3 for responder).
+    #[must_use]
     pub fn remote_public_key(&self) -> Option<Vec<u8>> {
-        self.handshake.get_remote_static().map(|k| k.to_vec())
+        self.handshake.get_remote_static().map(<[u8]>::to_vec)
     }
 
     /// Transition to transport mode after handshake completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::HandshakeStateError`] if the handshake is not
+    /// complete, or [`CryptoError::HandshakeFailed`] if transition fails.
     pub fn into_transport(self) -> Result<NoiseXXSession, CryptoError> {
         if self.state != HandshakeState::Complete {
             return Err(CryptoError::HandshakeStateError(
@@ -337,22 +365,22 @@ impl NoiseHandshake {
     }
 }
 
-/// A Noise XX session implementing the CryptoSession trait.
+/// A Noise XX session implementing the `CryptoSession` trait.
 ///
-/// Created from a completed NoiseHandshake via `into_transport()`.
-/// Uses ChaCha20-Poly1305 AEAD for encryption/decryption.
+/// Created from a completed `NoiseHandshake` via `into_transport()`.
+/// Uses `ChaCha20-Poly1305` AEAD for encryption/decryption.
 pub struct NoiseXXSession {
     transport: Mutex<snow::TransportState>,
 }
 
 impl NoiseXXSession {
     /// Get the remote peer's static public key.
+    #[must_use]
     pub fn remote_public_key(&self) -> Vec<u8> {
         self.transport
             .lock()
-            .unwrap()
             .get_remote_static()
-            .map(|k| k.to_vec())
+            .map(<[u8]>::to_vec)
             .unwrap_or_default()
     }
 }
@@ -360,11 +388,9 @@ impl NoiseXXSession {
 impl CryptoSession for NoiseXXSession {
     fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
         let mut buf = vec![0u8; plaintext.len() + 16]; // 16 bytes for AEAD tag
-        let mut transport = self
+        let len = self
             .transport
             .lock()
-            .map_err(|e| CryptoError::EncryptionFailed(format!("lock poisoned: {e}")))?;
-        let len = transport
             .write_message(plaintext, &mut buf)
             .map_err(|e| CryptoError::EncryptionFailed(e.to_string()))?;
         buf.truncate(len);
@@ -373,11 +399,9 @@ impl CryptoSession for NoiseXXSession {
 
     fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {
         let mut buf = vec![0u8; ciphertext.len()];
-        let mut transport = self
+        let len = self
             .transport
             .lock()
-            .map_err(|e| CryptoError::DecryptionFailed(format!("lock poisoned: {e}")))?;
-        let len = transport
             .read_message(ciphertext, &mut buf)
             .map_err(|e| CryptoError::DecryptionFailed(e.to_string()))?;
         buf.truncate(len);

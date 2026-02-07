@@ -44,7 +44,7 @@ pub enum StoreError {
 ///
 /// Implementations include:
 /// - `InMemoryStore` — in-memory store for testing (T-001-10)
-/// - SQLite store — persistent storage (Sprint 5)
+/// - `SQLite` store -- persistent storage (Sprint 5)
 pub trait MessageStore: Send + Sync {
     /// Save a message with its current delivery status.
     fn save(
@@ -135,6 +135,7 @@ impl<S: MessageStore> ResilientHistoryWriter<S> {
     ///
     /// Returns the writer and a receiver for [`HistoryWarning`] events
     /// that the UI can consume.
+    #[must_use]
     pub fn new(
         store: S,
         warning_buffer: usize,
@@ -205,8 +206,12 @@ impl<S: MessageStore> ResilientHistoryWriter<S> {
 
     /// Delegate reads directly to the underlying store.
     ///
-    /// Read failures are NOT handled resiliently — they bubble up to the
+    /// Read failures are NOT handled resiliently -- they bubble up to the
     /// caller, since there is nothing useful to retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the underlying store read fails.
     pub async fn get_conversation(
         &self,
         conversation: &ConversationId,
@@ -300,6 +305,7 @@ pub struct InMemoryStore {
 
 impl InMemoryStore {
     /// Create a new, empty in-memory store.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             messages: Mutex::new(HashMap::new()),
@@ -315,8 +321,10 @@ impl Default for InMemoryStore {
 
 impl MessageStore for InMemoryStore {
     async fn save(&self, msg: &ChatMessage, status: MessageStatus) -> Result<(), StoreError> {
-        let mut messages = self.messages.lock().await;
-        messages.insert(msg.metadata.message_id.clone(), (msg.clone(), status));
+        self.messages
+            .lock()
+            .await
+            .insert(msg.metadata.message_id.clone(), (msg.clone(), status));
         Ok(())
     }
 
@@ -336,8 +344,10 @@ impl MessageStore for InMemoryStore {
         conversation: &ConversationId,
         limit: usize,
     ) -> Result<Vec<(ChatMessage, MessageStatus)>, StoreError> {
-        let messages = self.messages.lock().await;
-        let mut results: Vec<(ChatMessage, MessageStatus)> = messages
+        let mut results: Vec<(ChatMessage, MessageStatus)> = self
+            .messages
+            .lock()
+            .await
             .values()
             .filter(|(msg, _)| msg.metadata.conversation_id == *conversation)
             .cloned()

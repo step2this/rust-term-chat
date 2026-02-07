@@ -1,4 +1,4 @@
-//! Transport layer abstraction for TermChat.
+//! Transport layer abstraction for `TermChat`.
 //!
 //! Defines the [`Transport`] trait that all transport implementations must satisfy.
 //! Concrete implementations include:
@@ -28,6 +28,7 @@ impl PeerId {
     }
 
     /// Return the string representation of this peer ID.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }

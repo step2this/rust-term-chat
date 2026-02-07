@@ -1,8 +1,8 @@
-//! TermChat Relay Server — lightweight store-and-forward relay.
+//! `TermChat` Relay Server -- lightweight store-and-forward relay.
 //!
 //! An axum WebSocket server that routes encrypted payloads between
-//! TermChat peers. The relay never sees plaintext — it only forwards
-//! opaque encrypted blobs identified by PeerId.
+//! `TermChat` peers. The relay never sees plaintext -- it only forwards
+//! opaque encrypted blobs identified by `PeerId`.
 //!
 //! # Usage
 //!

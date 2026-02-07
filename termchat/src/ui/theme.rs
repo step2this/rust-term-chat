@@ -34,26 +34,31 @@ pub const SENDER_COLORS: [Color; 6] = [
 ];
 
 /// Normal text style.
+#[must_use]
 pub fn normal() -> Style {
     Style::default().fg(FG_PRIMARY)
 }
 
 /// Dimmed text style (timestamps, metadata).
+#[must_use]
 pub fn dimmed() -> Style {
     Style::default().fg(FG_SECONDARY)
 }
 
 /// Bold text style.
+#[must_use]
 pub fn bold() -> Style {
     Style::default().fg(FG_PRIMARY).add_modifier(Modifier::BOLD)
 }
 
 /// Highlighted text style (focused panel borders).
+#[must_use]
 pub fn highlighted() -> Style {
     Style::default().fg(HIGHLIGHT).add_modifier(Modifier::BOLD)
 }
 
 /// Selected item style (in lists).
+#[must_use]
 pub fn selected() -> Style {
     Style::default()
         .fg(Color::Black)
@@ -62,9 +67,10 @@ pub fn selected() -> Style {
 }
 
 /// Get a color for a sender based on their name.
+#[must_use]
 pub fn sender_color(name: &str) -> Color {
-    let hash = name
-        .bytes()
-        .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+    let hash = name.bytes().fold(0u32, |acc, b| {
+        acc.wrapping_mul(31).wrapping_add(u32::from(b))
+    });
     SENDER_COLORS[(hash as usize) % SENDER_COLORS.len()]
 }

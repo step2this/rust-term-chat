@@ -14,7 +14,7 @@ const MAX_QUEUE_SIZE: usize = 1000;
 /// A message stored for later delivery to an offline peer.
 #[derive(Debug, Clone)]
 pub struct StoredMessage {
-    /// PeerId of the sender.
+    /// `PeerId` of the sender.
     pub from: String,
     /// Opaque encrypted payload bytes.
     pub payload: Vec<u8>,
@@ -40,6 +40,7 @@ impl Default for MessageStore {
 
 impl MessageStore {
     /// Creates a new, empty message store.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             queues: RwLock::new(HashMap::new()),
@@ -50,6 +51,7 @@ impl MessageStore {
     ///
     /// If the peer's queue exceeds [`MAX_QUEUE_SIZE`], the oldest message is
     /// evicted (FIFO).
+    #[allow(clippy::cast_possible_truncation)]
     pub async fn enqueue(&self, to: &str, from: &str, payload: Vec<u8>) -> u32 {
         let mut queues = self.queues.write().await;
         let queue = queues.entry(to.to_string()).or_default();
@@ -61,7 +63,10 @@ impl MessageStore {
         if queue.len() > MAX_QUEUE_SIZE {
             queue.pop_front();
         }
-        queue.len() as u32
+        // Safe: MAX_QUEUE_SIZE is 1000, well within u32 range.
+        let len = queue.len() as u32;
+        drop(queues);
+        len
     }
 
     /// Drains all queued messages for a peer, returning them in FIFO order.
@@ -77,9 +82,10 @@ impl MessageStore {
     }
 
     /// Returns the number of messages currently queued for a peer.
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::cast_possible_truncation)]
     pub async fn queue_len(&self, peer_id: &str) -> u32 {
         let queues = self.queues.read().await;
+        // Safe: MAX_QUEUE_SIZE is 1000, well within u32 range.
         queues.get(peer_id).map_or(0, |q| q.len() as u32)
     }
 }
