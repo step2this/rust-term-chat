@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project State
 
-Active development. Three-crate workspace is initialized and building. Completed: UC-001 (Send), UC-002 (Receive), UC-005 (E2E Handshake), Phase 1 (Hello Ratatui TUI). 149 tests passing. Next: UC-003 (P2P) or UC-004 (Relay Fallback).
+Active development. Three-crate workspace is initialized and building. Completed: UC-001 (Send), UC-002 (Receive), UC-005 (E2E Handshake), UC-003 (P2P Connection), Phase 1 (Hello Ratatui TUI). 190 tests passing. Next: UC-004 (Relay Fallback).
 
 ## Build & Development Commands
 
@@ -14,9 +14,10 @@ Active development. Three-crate workspace is initialized and building. Completed
 cargo build
 cargo run                                # launch TUI client
 cargo run --bin termchat-relay           # relay server (stub)
-cargo test                               # all tests (149)
+cargo test                               # all tests (190)
 cargo test --test send_receive           # UC-001/UC-002 integration test
 cargo test --test e2e_encryption         # UC-005 integration test
+cargo test --test p2p_connection         # UC-003 integration test
 cargo test --lib                         # unit tests only
 cargo test -p termchat-proto             # proto crate tests only
 cargo fmt --check
@@ -50,6 +51,7 @@ termchat/src/
   transport/
     mod.rs         # Transport trait, PeerId, TransportError
     loopback.rs    # LoopbackTransport (mpsc channels, for testing)
+    quic.rs        # QuicTransport + QuicListener (QUIC via quinn, UC-003)
     hybrid.rs      # HybridTransport (preferred + fallback + offline queue)
 
 termchat-proto/src/

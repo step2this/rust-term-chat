@@ -1,10 +1,10 @@
-# Current Sprint: Sprint 3 — P2P Networking
+# Current Sprint: Sprint 4 — Relay Fallback
 
 ## Goal
 
-Establish QUIC-based P2P connections between two TermChat instances. This is the first real networking sprint — previous sprints used loopback transports.
+Implement a WebSocket-based relay server and client as fallback transport when P2P (QUIC) connections fail. This completes Phase 4: Hybrid Networking.
 
-## Status: Complete
+## Status: In Progress
 
 ## Prerequisites (all met)
 
@@ -12,34 +12,35 @@ Establish QUIC-based P2P connections between two TermChat instances. This is the
 - [x] UC-002 Receive Direct Message (Sprint 1)
 - [x] UC-005 E2E Handshake (Sprint 2)
 - [x] Phase 1 Hello Ratatui TUI (Sprint 2)
+- [x] UC-003 Establish P2P Connection (Sprint 3)
 
 ## Use Cases This Sprint
 
 | UC | Title | Status | Task Decomposition | Agent Team |
 |----|-------|--------|--------------------|------------|
-| UC-003 | Establish P2P Connection | Done | `docs/tasks/uc-003-tasks.md` | `docs/teams/uc-003-team.md` |
+| UC-004 | Relay Fallback | Not Started | — | — |
 
 ## Rust Concepts to Learn
 
 Per blueprint (Section 2.4):
-- Tokio networking
-- quinn (QUIC)
-- Futures and pinning
-- `Arc<Mutex<>>`
+- WebSockets (tokio-tungstenite)
+- State machines (relay connection lifecycle)
+- Enum-based transport abstraction (Transport trait, already exists)
+- Trait objects (dynamic dispatch for hybrid transport)
 
 ## Process Checklist
 
 Before starting implementation:
-- [x] Write UC-003 use case with `/uc-create`
-- [x] Review UC-003 with `/uc-review`
-- [x] Fix 6 review issues (false dependency, missing accept flow, etc.)
-- [x] Run `/task-decompose uc-003` to break into tasks (14 tasks)
-- [x] Run `/agent-team-plan uc-003` to design agent team (3 agents)
-- [x] Get user approval on team plan
-- [x] Spawn team and execute (all 14 tasks complete)
-- [x] Gate 3: `cargo fmt --check && cargo clippy -- -D warnings && cargo test` — 190 tests pass
-- [x] Verification: `cargo test --test p2p_connection` — 10/10 pass
-- [x] Commit: `69e0f17`
+- [ ] Write UC-004 use case with `/uc-create`
+- [ ] Review UC-004 with `/uc-review`
+- [ ] Fix review issues
+- [ ] Run `/task-decompose uc-004` to break into tasks
+- [ ] Run `/agent-team-plan uc-004` to design agent team
+- [ ] Get user approval on team plan
+- [ ] Spawn team and execute
+- [ ] Gate 3: `cargo fmt --check && cargo clippy -- -D warnings && cargo test`
+- [ ] Verification: `cargo test --test relay_fallback`
+- [ ] Commit
 
 ## Previous Sprints
 
@@ -48,3 +49,4 @@ Before starting implementation:
 | Sprint 0 (Phase 0) | Forge Setup | Done | `docs/retrospectives/phase0-uc001-uc005.md` |
 | Sprint 1 | UC-001, UC-002 | Done | `docs/retrospectives/phase0-uc001-uc005.md` |
 | Sprint 2 | UC-005, Phase 1 TUI | Done | `docs/retrospectives/phase0-uc001-uc005.md` |
+| Sprint 3 | UC-003 | Done | — |
