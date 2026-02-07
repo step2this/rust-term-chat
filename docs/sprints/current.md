@@ -41,7 +41,7 @@ Per blueprint (Section 2.4):
 - [x] Quality gates
 - [x] Verification
 - [x] Commit
-- [ ] Retrospective
+- [x] Retrospective (`docs/retrospectives/sprint5-uc006.md`)
 
 ## Previous Sprints
 

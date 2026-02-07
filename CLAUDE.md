@@ -91,6 +91,8 @@ When running multi-agent teams, assign module ownership to prevent merge conflic
 - Always run `/task-decompose` before implementing, even for small use cases
 - Always include a reviewer agent in team configurations
 - Keep agent tasks scoped to <20 tool calls to avoid context kills
+- Builders must run `cargo fmt` before marking any task complete (not just at final gate)
+- When spawning builder agents, include explicit "claim task #N immediately" in the prompt
 
 ## Test Strategy
 
