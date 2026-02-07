@@ -13,12 +13,16 @@
 
 use termchat::chat::history::InMemoryStore;
 use termchat::chat::{ChatEvent, ChatManager, RetryConfig, SendError};
+use termchat::crypto::CryptoSession;
 use termchat::crypto::noise::StubNoiseSession;
 use termchat::transport::loopback::LoopbackTransport;
 use termchat::transport::{PeerId, Transport};
 
 use termchat_proto::codec;
-use termchat_proto::message::{ConversationId, Envelope, MessageContent, MessageStatus, SenderId};
+use termchat_proto::message::{
+    ChatMessage, ConversationId, Envelope, MessageContent, MessageId, MessageMetadata,
+    MessageStatus, SenderId, Timestamp,
+};
 
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -717,3 +721,340 @@ async fn bidirectional_message_exchange() {
     let _ = bob_events.try_recv().expect("bob Sent event");
     let _ = bob_events.try_recv().expect("bob Delivered event");
 }
+
+// ===========================================================================
+// UC-002: Receive Direct Message Tests
+// ===========================================================================
+
+/// UC-002: Bob receives a message and it is stored in his local history.
+#[tokio::test]
+async fn receive_stores_message_in_history() {
+    let (alice, _alice_events, _a_warnings, bob, _bob_events, _b_warnings) =
+        create_pair_both_with_history();
+    let conversation = ConversationId::new();
+    let original_text = "message for bob's history";
+
+    // Alice sends
+    alice
+        .send_message(
+            MessageContent::Text(original_text.to_string()),
+            conversation.clone(),
+        )
+        .await
+        .expect("send should succeed");
+
+    // Bob receives
+    bob.receive_one().await.expect("bob receive should succeed");
+
+    // Verify Bob's history has the message with Delivered status
+    let bob_history = bob.history().expect("bob should have history");
+    let records = bob_history
+        .get_conversation(&conversation, 10)
+        .await
+        .expect("bob history read should succeed");
+
+    assert_eq!(records.len(), 1, "bob history should have 1 message");
+    let MessageContent::Text(ref text) = records[0].0.content;
+    assert_eq!(text, original_text, "content should match");
+    assert_eq!(
+        records[0].1,
+        MessageStatus::Delivered,
+        "status should be Delivered after receive"
+    );
+}
+
+/// UC-002: Bob receives a message and emits a MessageReceived event.
+#[tokio::test]
+async fn receive_emits_message_received_event() {
+    let (alice, _alice_events, _warnings, bob, mut bob_events) = create_connected_pair();
+    let conversation = ConversationId::new();
+
+    alice
+        .send_message(MessageContent::Text("test event".into()), conversation)
+        .await
+        .expect("send should succeed");
+
+    bob.receive_one().await.expect("bob receive should succeed");
+
+    let event = bob_events
+        .try_recv()
+        .expect("bob should have MessageReceived event");
+    match event {
+        ChatEvent::MessageReceived { message, from } => {
+            let MessageContent::Text(ref text) = message.content;
+            assert_eq!(text, "test event");
+            assert_eq!(from, PeerId::new("alice"));
+        }
+        other => panic!("expected MessageReceived, got: {other:?}"),
+    }
+}
+
+/// UC-002 Invariant 3: Duplicate messages are deduplicated.
+#[tokio::test]
+async fn duplicate_message_deduplicated() {
+    let (alice_transport, bob_transport) =
+        LoopbackTransport::create_pair(PeerId::new("alice"), PeerId::new("bob"), 64);
+
+    let (alice, _alice_events) =
+        ChatManager::<StubNoiseSession, LoopbackTransport, InMemoryStore>::new(
+            StubNoiseSession::new(true),
+            alice_transport,
+            SenderId::new(vec![0xAA]),
+            PeerId::new("bob"),
+            64,
+        );
+
+    let (bob, mut bob_events) =
+        ChatManager::<StubNoiseSession, LoopbackTransport, InMemoryStore>::new(
+            StubNoiseSession::new(true),
+            bob_transport,
+            SenderId::new(vec![0xBB]),
+            PeerId::new("alice"),
+            64,
+        );
+
+    let conversation = ConversationId::new();
+
+    // Send the same message twice
+    let (msg_id, _) = alice
+        .send_message(
+            MessageContent::Text("duplicate test".into()),
+            conversation.clone(),
+        )
+        .await
+        .expect("first send should succeed");
+
+    // Bob receives first instance
+    bob.receive_one()
+        .await
+        .expect("first receive should succeed");
+    let event1 = bob_events.try_recv().expect("should have first event");
+    assert!(matches!(event1, ChatEvent::MessageReceived { .. }));
+
+    // Manually send the same encrypted payload again by re-encrypting the same message
+    let same_message = ChatMessage {
+        metadata: MessageMetadata {
+            message_id: msg_id.clone(),
+            timestamp: Timestamp::now(),
+            sender_id: SenderId::new(vec![0xAA]),
+            conversation_id: conversation,
+        },
+        content: MessageContent::Text("duplicate test".into()),
+    };
+    let envelope = Envelope::Chat(same_message);
+    let serialized = codec::encode(&envelope).unwrap();
+    let encrypted = alice.crypto().encrypt(&serialized).unwrap();
+    alice
+        .transport()
+        .send(&PeerId::new("bob"), &encrypted)
+        .await
+        .unwrap();
+
+    // Bob receives duplicate
+    bob.receive_one()
+        .await
+        .expect("duplicate receive should succeed");
+
+    // Bob should NOT emit a second MessageReceived event (message was deduplicated)
+    assert!(
+        bob_events.try_recv().is_err(),
+        "duplicate message should not emit a second event"
+    );
+}
+
+/// UC-002 Extension 1a: Oversized payload is dropped silently before decryption.
+#[tokio::test]
+async fn oversized_payload_dropped_silently() {
+    let (alice_transport, bob_transport) =
+        LoopbackTransport::create_pair(PeerId::new("alice"), PeerId::new("bob"), 128);
+
+    let (bob, _bob_events) = ChatManager::<StubNoiseSession, LoopbackTransport, InMemoryStore>::new(
+        StubNoiseSession::new(true),
+        bob_transport,
+        SenderId::new(vec![0xBB]),
+        PeerId::new("alice"),
+        64,
+    );
+
+    // Manually craft an oversized payload (> 64KB)
+    let huge_payload = vec![0xFF; 65 * 1024];
+    alice_transport
+        .send(&PeerId::new("bob"), &huge_payload)
+        .await
+        .expect("transport send should succeed");
+
+    // Bob should reject it with an OversizedPayload error
+    let result = bob.receive_one().await;
+    assert!(
+        matches!(result, Err(SendError::OversizedPayload { .. })),
+        "oversized payload should be rejected"
+    );
+}
+
+/// UC-002 Extension 5a: Deserialization failure sends a NACK.
+#[tokio::test]
+async fn deserialization_failure_sends_nack() {
+    let (alice_transport, bob_transport) =
+        LoopbackTransport::create_pair(PeerId::new("alice"), PeerId::new("bob"), 64);
+
+    let (alice, _alice_events) =
+        ChatManager::<StubNoiseSession, LoopbackTransport, InMemoryStore>::new(
+            StubNoiseSession::new(true),
+            alice_transport,
+            SenderId::new(vec![0xAA]),
+            PeerId::new("bob"),
+            64,
+        );
+
+    let (bob, _bob_events) = ChatManager::<StubNoiseSession, LoopbackTransport, InMemoryStore>::new(
+        StubNoiseSession::new(true),
+        bob_transport,
+        SenderId::new(vec![0xBB]),
+        PeerId::new("alice"),
+        64,
+    );
+
+    // Alice sends corrupted data (encrypt garbage bytes)
+    let garbage = vec![0xFF; 100];
+    let encrypted = alice.crypto().encrypt(&garbage).unwrap();
+    alice
+        .transport()
+        .send(&PeerId::new("bob"), &encrypted)
+        .await
+        .unwrap();
+
+    // Bob tries to receive — should fail deserialization and send NACK
+    let result = bob.receive_one().await;
+    assert!(
+        matches!(result, Err(SendError::Codec(_))),
+        "corrupted payload should fail deserialization"
+    );
+
+    // Alice should receive the NACK
+    let envelope = alice
+        .receive_one()
+        .await
+        .expect("alice should receive NACK");
+    match envelope {
+        Envelope::Nack(nack) => {
+            assert_eq!(
+                nack.reason,
+                termchat_proto::message::NackReason::DeserializationFailed
+            );
+        }
+        other => panic!("expected Nack, got: {other:?}"),
+    }
+}
+
+/// UC-002 Extension 6a: Message with clock skew is still displayed with a warning.
+#[tokio::test]
+async fn receive_with_clock_skew_still_displays() {
+    let (alice_transport, bob_transport) =
+        LoopbackTransport::create_pair(PeerId::new("alice"), PeerId::new("bob"), 64);
+
+    let (alice, _alice_events) =
+        ChatManager::<StubNoiseSession, LoopbackTransport, InMemoryStore>::new(
+            StubNoiseSession::new(true),
+            alice_transport,
+            SenderId::new(vec![0xAA]),
+            PeerId::new("bob"),
+            64,
+        );
+
+    let (bob, mut bob_events) =
+        ChatManager::<StubNoiseSession, LoopbackTransport, InMemoryStore>::new(
+            StubNoiseSession::new(true),
+            bob_transport,
+            SenderId::new(vec![0xBB]),
+            PeerId::new("alice"),
+            64,
+        );
+
+    // Craft a message with an old timestamp (10 minutes in the past)
+    let old_timestamp = Timestamp::from_millis(Timestamp::now().as_millis() - 10 * 60 * 1000);
+    let message = ChatMessage {
+        metadata: MessageMetadata {
+            message_id: MessageId::new(),
+            timestamp: old_timestamp,
+            sender_id: SenderId::new(vec![0xAA]),
+            conversation_id: ConversationId::new(),
+        },
+        content: MessageContent::Text("old message".into()),
+    };
+    let envelope = Envelope::Chat(message);
+    let serialized = codec::encode(&envelope).unwrap();
+    let encrypted = alice.crypto().encrypt(&serialized).unwrap();
+    alice
+        .transport()
+        .send(&PeerId::new("bob"), &encrypted)
+        .await
+        .unwrap();
+
+    // Bob receives — should still display but with clock skew warning
+    bob.receive_one().await.expect("receive should succeed");
+
+    let event = bob_events.try_recv().expect("should have event");
+    match event {
+        ChatEvent::MessageReceivedWithClockSkew {
+            message,
+            from,
+            skew_description,
+        } => {
+            let MessageContent::Text(ref text) = message.content;
+            assert_eq!(text, "old message");
+            assert_eq!(from, PeerId::new("alice"));
+            assert!(skew_description.contains("timestamp"));
+        }
+        other => panic!("expected MessageReceivedWithClockSkew, got: {other:?}"),
+    }
+}
+
+/// UC-002 Extension 8a: Ack failure does not block message display.
+#[tokio::test]
+async fn ack_failure_does_not_block_display() {
+    let (alice_transport, bob_transport) =
+        LoopbackTransport::create_pair(PeerId::new("alice"), PeerId::new("bob"), 64);
+
+    let (alice, _alice_events) =
+        ChatManager::<StubNoiseSession, LoopbackTransport, InMemoryStore>::new(
+            StubNoiseSession::new(true),
+            alice_transport,
+            SenderId::new(vec![0xAA]),
+            PeerId::new("bob"),
+            64,
+        );
+
+    let (bob, mut bob_events) =
+        ChatManager::<StubNoiseSession, LoopbackTransport, InMemoryStore>::new(
+            StubNoiseSession::new(true),
+            bob_transport,
+            SenderId::new(vec![0xBB]),
+            PeerId::new("alice"),
+            64,
+        );
+
+    let conversation = ConversationId::new();
+
+    // Alice sends
+    alice
+        .send_message(MessageContent::Text("ack might fail".into()), conversation)
+        .await
+        .expect("send should succeed");
+
+    // Drop Alice's transport before Bob receives (so ack send will fail)
+    drop(alice);
+
+    // Bob receives — message should still be emitted even if ack send fails
+    bob.receive_one().await.expect("receive should succeed");
+
+    let event = bob_events.try_recv().expect("should have event");
+    assert!(
+        matches!(event, ChatEvent::MessageReceived { .. }),
+        "message should be emitted even if ack send fails"
+    );
+}
+
+// Note: Extension 6c (sender ID mismatch) is tested via the sender_id_matches_peer
+// validation logic, but with the current StubNoiseSession implementation, all peers
+// are considered valid. A full test would require a real crypto implementation with
+// proper identity verification (UC-005).

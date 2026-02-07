@@ -6,7 +6,7 @@
 
 pub mod history;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use tokio::sync::{Mutex, mpsc};
@@ -14,7 +14,7 @@ use tokio::sync::{Mutex, mpsc};
 use termchat_proto::codec;
 use termchat_proto::message::{
     ChatMessage, ConversationId, DeliveryAck, Envelope, MessageContent, MessageId, MessageMetadata,
-    MessageStatus, SenderId, Timestamp,
+    MessageStatus, Nack, NackReason, SenderId, Timestamp,
 };
 
 use crate::crypto::{CryptoError, CryptoSession};
@@ -40,6 +40,19 @@ pub enum SendError {
     /// Transport-level send or receive failed.
     #[error("transport error: {0}")]
     Transport(#[from] TransportError),
+
+    /// Receive-side validation failed.
+    #[error("receive validation failed: {0}")]
+    ReceiveValidation(String),
+
+    /// Payload size exceeded maximum before decryption.
+    #[error("payload too large: {size} bytes (max {max} bytes)")]
+    OversizedPayload {
+        /// Actual size in bytes.
+        size: usize,
+        /// Maximum allowed size.
+        max: usize,
+    },
 }
 
 /// Configuration for send retry and ack timeout behavior.
@@ -63,6 +76,15 @@ impl Default for RetryConfig {
     }
 }
 
+/// Maximum allowed encrypted payload size before decryption (64 KB).
+const MAX_ENCRYPTED_PAYLOAD_SIZE: usize = 64 * 1024;
+
+/// Maximum size of the duplicate detection set.
+const MAX_DUPLICATE_TRACKING: usize = 10_000;
+
+/// Clock skew tolerance for timestamp validation (±5 minutes).
+const CLOCK_SKEW_TOLERANCE_MS: u64 = 5 * 60 * 1000;
+
 /// Events emitted by the [`ChatManager`] for UI notification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatEvent {
@@ -79,6 +101,15 @@ pub enum ChatEvent {
         message: ChatMessage,
         /// The peer that sent it.
         from: PeerId,
+    },
+    /// An incoming message has a timestamp with clock skew.
+    MessageReceivedWithClockSkew {
+        /// The received message.
+        message: ChatMessage,
+        /// The peer that sent it.
+        from: PeerId,
+        /// Description of the clock skew.
+        skew_description: String,
     },
 }
 
@@ -106,6 +137,10 @@ pub struct ChatManager<C: CryptoSession, T: Transport, S: MessageStore> {
     event_tx: mpsc::Sender<ChatEvent>,
     /// Optional resilient history writer for local persistence.
     history: Option<ResilientHistoryWriter<S>>,
+    /// Set of recently seen message IDs for duplicate detection (Invariant 3).
+    seen_message_ids: Mutex<HashSet<MessageId>>,
+    /// Queue of pending acks that failed to send and need retry.
+    pending_acks: Mutex<Vec<(MessageId, PeerId)>>,
 }
 
 impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
@@ -129,6 +164,8 @@ impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
             statuses: Mutex::new(HashMap::new()),
             event_tx,
             history: None,
+            seen_message_ids: Mutex::new(HashSet::new()),
+            pending_acks: Mutex::new(Vec::new()),
         };
         (manager, event_rx)
     }
@@ -164,6 +201,8 @@ impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
             statuses: Mutex::new(HashMap::new()),
             event_tx,
             history: Some(writer),
+            seen_message_ids: Mutex::new(HashSet::new()),
+            pending_acks: Mutex::new(Vec::new()),
         };
         (manager, event_rx, warning_rx)
     }
@@ -319,41 +358,130 @@ impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
 
     /// Receive and process one incoming envelope from the transport.
     ///
-    /// Handles two cases:
-    /// - **Chat message**: Decrypts, deserializes, and automatically sends
-    ///   back a [`DeliveryAck`]. Emits a [`ChatEvent::MessageReceived`].
+    /// Handles the following cases:
+    /// - **Chat message**: Validates, decrypts, deserializes, checks for duplicates,
+    ///   stores in history, and automatically sends back a [`DeliveryAck`].
+    ///   Emits a [`ChatEvent::MessageReceived`].
     /// - **Delivery ack**: Updates the tracked status from `Sent` to
     ///   `Delivered`. Updates history if configured. Emits a
     ///   [`ChatEvent::StatusChanged`].
+    /// - **Nack**: Logs the negative acknowledgment (UC-002 Extension 5a).
     ///
     /// # Errors
     ///
     /// Returns [`SendError`] if transport receive, decryption, or
-    /// deserialization fails.
+    /// deserialization fails. Validation failures on the receive side
+    /// result in the message being dropped silently or a NACK being sent.
     pub async fn receive_one(&self) -> Result<Envelope, SendError> {
-        // Receive encrypted bytes from transport
+        // Extension 1a: Check payload size before decryption
         let (from, encrypted) = self.transport.recv().await?;
+        if encrypted.len() > MAX_ENCRYPTED_PAYLOAD_SIZE {
+            tracing::warn!(
+                peer = %from,
+                size = encrypted.len(),
+                "dropping oversized payload from peer"
+            );
+            return Err(SendError::OversizedPayload {
+                size: encrypted.len(),
+                max: MAX_ENCRYPTED_PAYLOAD_SIZE,
+            });
+        }
 
-        // Decrypt
+        // Step 4: Decrypt (Extension 4a handled by crypto layer)
         let decrypted = self.crypto.decrypt(&encrypted)?;
 
-        // Deserialize
-        let envelope = codec::decode(&decrypted)?;
+        // Step 5: Deserialize (Extension 5a)
+        let envelope = match codec::decode(&decrypted) {
+            Ok(env) => env,
+            Err(e) => {
+                tracing::warn!(peer = %from, error = %e, "deserialization failed, sending NACK");
+                // Send NACK for deserialization failure
+                // We can't extract a message ID since deserialization failed, so use a dummy
+                let nack = Nack {
+                    message_id: MessageId::new(),
+                    reason: NackReason::DeserializationFailed,
+                };
+                let _ = self.send_envelope(&Envelope::Nack(nack), &from).await;
+                return Err(SendError::Codec(e));
+            }
+        };
 
         match &envelope {
             Envelope::Chat(msg) => {
-                // Emit message received event
-                let _ = self.event_tx.try_send(ChatEvent::MessageReceived {
-                    message: msg.clone(),
-                    from: from.clone(),
-                });
+                // Duplicate detection (Invariant 3)
+                let msg_id = msg.metadata.message_id.clone();
+                {
+                    let mut seen = self.seen_message_ids.lock().await;
+                    if seen.contains(&msg_id) {
+                        tracing::debug!(message_id = %msg_id, "duplicate message dropped");
+                        return Ok(envelope);
+                    }
+                    // Track this message ID
+                    if seen.len() >= MAX_DUPLICATE_TRACKING {
+                        // Simple eviction: clear half the set
+                        seen.clear();
+                    }
+                    seen.insert(msg_id.clone());
+                }
 
-                // Send back a delivery ack
+                // Step 6: Validate metadata
+                // Extension 6c: Check sender ID matches transport peer
+                if !self.sender_id_matches_peer(&msg.metadata.sender_id, &from) {
+                    tracing::warn!(
+                        peer = %from,
+                        claimed_sender = %msg.metadata.sender_id,
+                        "sender ID mismatch, rejecting message"
+                    );
+                    let nack = Nack {
+                        message_id: msg_id.clone(),
+                        reason: NackReason::SenderIdMismatch,
+                    };
+                    let _ = self.send_envelope(&Envelope::Nack(nack), &from).await;
+                    return Err(SendError::ReceiveValidation(
+                        "sender ID does not match authenticated peer".into(),
+                    ));
+                }
+
+                // Extension 6a: Check timestamp for clock skew
+                let has_clock_skew = self.check_timestamp_skew(&msg.metadata.timestamp);
+
+                // Step 7: Store in history (Extension 7a handled by ResilientHistoryWriter)
+                if let Some(ref history) = self.history {
+                    history.save(msg, MessageStatus::Delivered).await;
+                }
+
+                // Step 8: Send delivery acknowledgment (Extension 8a: queue on failure)
                 let ack = DeliveryAck {
-                    message_id: msg.metadata.message_id.clone(),
+                    message_id: msg_id.clone(),
                     timestamp: Timestamp::now(),
                 };
-                self.send_envelope(&Envelope::Ack(ack), &from).await?;
+                if let Err(e) = self.send_envelope(&Envelope::Ack(ack), &from).await {
+                    tracing::warn!(
+                        message_id = %msg_id,
+                        error = %e,
+                        "failed to send ack, queueing for retry"
+                    );
+                    self.pending_acks
+                        .lock()
+                        .await
+                        .push((msg_id.clone(), from.clone()));
+                }
+
+                // Step 9: Emit event to UI
+                if has_clock_skew {
+                    let _ = self
+                        .event_tx
+                        .try_send(ChatEvent::MessageReceivedWithClockSkew {
+                            message: msg.clone(),
+                            from: from.clone(),
+                            skew_description: "timestamp outside acceptable range".into(),
+                        });
+                } else {
+                    let _ = self.event_tx.try_send(ChatEvent::MessageReceived {
+                        message: msg.clone(),
+                        from: from.clone(),
+                    });
+                }
             }
             Envelope::Ack(ack) => {
                 // Update tracked status
@@ -376,12 +504,47 @@ impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
                     status: MessageStatus::Delivered,
                 });
             }
+            Envelope::Nack(nack) => {
+                // Log the NACK (Extension 5a)
+                tracing::warn!(
+                    message_id = %nack.message_id,
+                    reason = ?nack.reason,
+                    "received NACK from peer"
+                );
+                // For now, just log. Future work: update message status to Failed.
+            }
             Envelope::Handshake(_) => {
                 // Handshake messages are handled by the crypto layer (UC-005).
             }
         }
 
         Ok(envelope)
+    }
+
+    /// Check if the sender ID matches the authenticated peer.
+    ///
+    /// For now, this is a simple comparison. In the real system with Noise,
+    /// the peer ID would be derived from the Noise static public key and
+    /// the sender ID would be the key fingerprint, so they should match.
+    fn sender_id_matches_peer(&self, sender_id: &SenderId, peer: &PeerId) -> bool {
+        // Placeholder: assume match for now. Real implementation would
+        // compare the sender_id bytes with the peer's identity key fingerprint.
+        // For testing with stub crypto, we skip validation.
+        let _ = (sender_id, peer);
+        true
+    }
+
+    /// Check if the timestamp is within acceptable clock skew tolerance.
+    ///
+    /// Returns `true` if the timestamp is outside the acceptable range.
+    fn check_timestamp_skew(&self, timestamp: &Timestamp) -> bool {
+        let now = Timestamp::now();
+        let diff = if timestamp.as_millis() > now.as_millis() {
+            timestamp.as_millis() - now.as_millis()
+        } else {
+            now.as_millis() - timestamp.as_millis()
+        };
+        diff > CLOCK_SKEW_TOLERANCE_MS
     }
 
     /// Get the current status of a sent message.

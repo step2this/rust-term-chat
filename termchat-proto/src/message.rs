@@ -252,6 +252,26 @@ pub struct DeliveryAck {
     pub timestamp: Timestamp,
 }
 
+/// Negative acknowledgment indicating message processing failed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+pub struct Nack {
+    /// The ID of the message being negatively acknowledged.
+    pub message_id: MessageId,
+    /// Reason for the NACK.
+    pub reason: NackReason,
+}
+
+/// Reason for a negative acknowledgment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+pub enum NackReason {
+    /// Deserialization failed (unknown format or version).
+    DeserializationFailed,
+    /// Sender ID in metadata does not match authenticated peer.
+    SenderIdMismatch,
+    /// Other reason (free-form string).
+    Other(String),
+}
+
 /// Top-level envelope wrapping all wire-level protocol messages.
 ///
 /// Every message on the wire is wrapped in an `Envelope`, which allows
@@ -262,6 +282,8 @@ pub enum Envelope {
     Chat(ChatMessage),
     /// A delivery acknowledgment.
     Ack(DeliveryAck),
+    /// A negative acknowledgment indicating processing failure.
+    Nack(Nack),
     /// A handshake message (opaque bytes, interpreted by the crypto layer).
     Handshake(Vec<u8>),
 }
