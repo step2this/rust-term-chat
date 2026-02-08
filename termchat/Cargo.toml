@@ -76,3 +76,7 @@ path = "../tests/integration/presence_typing.rs"
 [[test]]
 name = "tui_net_wiring"
 path = "../tests/integration/tui_net_wiring.rs"
+
+[[test]]
+name = "relay_reconnect"
+path = "../tests/integration/relay_reconnect.rs"

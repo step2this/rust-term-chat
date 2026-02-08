@@ -316,19 +316,16 @@ async fn supervisor(
         )
         .await;
 
-        match reconnect_result {
-            Some(new_chat_event_rx) => {
-                // Reconnection succeeded. The new ChatManager is already in shared_mgr.
-                // Loop back to spawn new receive_loop + forwarder.
-                chat_event_rx = new_chat_event_rx;
+        if let Some(new_chat_event_rx) = reconnect_result {
+            // Reconnection succeeded. The new ChatManager is already in shared_mgr.
+            // Loop back to spawn new receive_loop + forwarder.
+            chat_event_rx = new_chat_event_rx;
+        } else {
+            // All attempts failed or shutdown requested.
+            if !shutdown_flag.load(Ordering::Relaxed) {
+                let _ = evt_tx.send(NetEvent::ReconnectFailed).await;
             }
-            None => {
-                // All attempts failed or shutdown requested.
-                if !shutdown_flag.load(Ordering::Relaxed) {
-                    let _ = evt_tx.send(NetEvent::ReconnectFailed).await;
-                }
-                break;
-            }
+            break;
         }
     }
 }
@@ -346,7 +343,6 @@ async fn reconnect_with_backoff(
     last_connected_at: &mut Option<Instant>,
 ) -> Option<mpsc::Receiver<ChatEvent>> {
     let reconnect = &config.reconnect;
-    let mut attempt_counter: u32 = 0;
 
     // Flap detection: if we were connected for less than the stability
     // threshold, don't reset the backoff counter (the connection was unstable).
@@ -379,10 +375,11 @@ async fn reconnect_with_backoff(
         };
 
         let total_delay = capped_delay + jitter;
+        let delay_ms = u64::try_from(total_delay.as_millis()).unwrap_or(u64::MAX);
         tracing::info!(
             attempt = attempt + 1,
             max_attempts = reconnect.max_attempts,
-            delay_ms = total_delay.as_millis() as u64,
+            delay_ms,
             "reconnecting to relay"
         );
 
@@ -403,10 +400,7 @@ async fn reconnect_with_backoff(
         // Try to connect.
         match RelayTransport::connect(&config.relay_url, PeerId::new(&config.local_peer_id)).await {
             Ok(transport) => {
-                tracing::info!(
-                    attempt = attempt + 1,
-                    "reconnected to relay successfully"
-                );
+                tracing::info!(attempt = attempt + 1, "reconnected to relay successfully");
 
                 // Create a new ChatManager.
                 let crypto = StubNoiseSession::new(true);
@@ -433,7 +427,6 @@ async fn reconnect_with_backoff(
 
                 // Update connection timestamp for flap detection.
                 *last_connected_at = Some(Instant::now());
-                attempt_counter = 0;
 
                 // Send reconnected status.
                 let _ = evt_tx
@@ -452,13 +445,12 @@ async fn reconnect_with_backoff(
                     error = %e,
                     "reconnect attempt failed"
                 );
-                attempt_counter = attempt + 1;
             }
         }
     }
 
     tracing::error!(
-        attempts = attempt_counter,
+        attempts = reconnect.max_attempts,
         "all reconnect attempts exhausted"
     );
     None
@@ -473,20 +465,21 @@ async fn drain_message_queue(
     message_queue: &MessageQueue,
     evt_tx: &mpsc::Sender<NetEvent>,
 ) {
-    let mut queue = message_queue.lock().await;
-    let count = queue.len();
-    if count == 0 {
-        return;
-    }
+    // Drain the queue into a local vec to release the lock quickly.
+    let messages: Vec<String> = {
+        let mut queue = message_queue.lock().await;
+        let count = queue.len();
+        if count == 0 {
+            return;
+        }
+        tracing::info!(count, "draining offline message queue");
+        queue.drain(..).collect()
+    };
 
-    tracing::info!(count, "draining offline message queue");
-
-    while let Some(text) = queue.pop_front() {
+    for text in messages {
         let mgr_guard = shared_mgr.read().await;
         if let Some(ref mgr) = *mgr_guard {
-            let content = MessageContent::Text(text.clone());
-            // Use a new conversation ID for queued messages.
-            // In a real system, we'd preserve the original conversation ID.
+            let content = MessageContent::Text(text);
             let conversation = ConversationId::new();
             if let Err(e) = mgr.send_message(content, conversation).await {
                 let _ = evt_tx
@@ -496,8 +489,8 @@ async fn drain_message_queue(
                     .await;
             }
         } else {
-            // ChatManager gone again; push remaining messages back.
-            queue.push_front(text);
+            // ChatManager gone again during drain; remaining messages are lost.
+            tracing::warn!("ChatManager unavailable during queue drain, messages lost");
             break;
         }
     }
@@ -516,10 +509,8 @@ async fn drain_message_queue(
 /// The supervisor guarantees that the `SharedChatManager` will not be
 /// modified while this task is running, so we read the `ChatManager`
 /// reference once at startup and use it throughout the loop.
-async fn receive_loop(
-    shared_mgr: SharedChatManager,
-    evt_tx: mpsc::Sender<NetEvent>,
-) {
+#[allow(clippy::significant_drop_tightening)]
+async fn receive_loop(shared_mgr: SharedChatManager, evt_tx: mpsc::Sender<NetEvent>) {
     // Take a snapshot of the ChatManager at startup. The supervisor will
     // not modify shared_mgr until this task completes.
     let mgr_guard = shared_mgr.read().await;
@@ -575,36 +566,37 @@ async fn command_handler(
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
             NetCommand::SendMessage { text } => {
-                let mgr_guard = shared_mgr.read().await;
-                if let Some(ref mgr) = *mgr_guard {
-                    let content = MessageContent::Text(text);
-                    match mgr.send_message(content, conversation.clone()).await {
-                        Ok((_msg_id, _status)) => {
-                            // Status update will come through ChatEvent -> NetEvent pipeline.
-                        }
-                        Err(e) => {
-                            let _ = evt_tx
-                                .send(NetEvent::Error(format!("Send failed: {e}")))
-                                .await;
-                        }
-                    }
-                } else {
-                    // Disconnected: queue the message for later delivery.
-                    let mut queue = message_queue.lock().await;
-                    if queue.len() < queue_cap {
-                        queue.push_back(text);
-                        let _ = evt_tx
-                            .send(NetEvent::Error(
-                                "Disconnected, message queued for delivery".to_string(),
-                            ))
-                            .await;
+                // Try to send if connected; queue on failure or disconnect.
+                let sent = {
+                    let mgr_guard = shared_mgr.read().await;
+                    if let Some(ref mgr) = *mgr_guard {
+                        let content = MessageContent::Text(text.clone());
+                        mgr.send_message(content, conversation.clone())
+                            .await
+                            .is_ok()
                     } else {
-                        let _ = evt_tx
-                            .send(NetEvent::Error(
-                                "Disconnected, message queue full — message dropped".to_string(),
-                            ))
-                            .await;
+                        false
                     }
+                };
+
+                if !sent {
+                    // Disconnected or send failed: queue for later delivery.
+                    let queue_full = {
+                        let mut queue = message_queue.lock().await;
+                        if queue.len() < queue_cap {
+                            queue.push_back(text);
+                            false
+                        } else {
+                            true
+                        }
+                    };
+
+                    let msg = if queue_full {
+                        "Disconnected, message queue full — message dropped"
+                    } else {
+                        "Disconnected, message queued for delivery"
+                    };
+                    let _ = evt_tx.send(NetEvent::Error(msg.to_string())).await;
                 }
             }
             NetCommand::Shutdown => {
