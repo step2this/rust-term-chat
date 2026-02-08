@@ -368,7 +368,7 @@ async fn reconnect_with_backoff(
         // Add jitter: 0..25% of the capped delay.
         let jitter_range = capped_delay.as_millis() / 4;
         let jitter = if jitter_range > 0 {
-            let jitter_ms = rand::thread_rng().gen_range(0..=jitter_range);
+            let jitter_ms = rand::rng().random_range(0..=jitter_range);
             std::time::Duration::from_millis(u64::try_from(jitter_ms).unwrap_or(0))
         } else {
             std::time::Duration::ZERO

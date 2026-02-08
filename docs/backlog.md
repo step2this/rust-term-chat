@@ -2,11 +2,17 @@
 
 Items not assigned to a sprint yet. Pull from here when planning future work.
 
+## Architecture / Refactoring
+
+| # | Item | Description | Source | Priority |
+|---|------|-------------|--------|----------|
+| 10 | ChatManager refactor | Extract ChatManager into a cleaner architecture — currently a monolith handling send/receive pipeline, ack tracking, events, and config. Consider splitting into separate send/receive/ack modules with clearer boundaries. Code quality grade flagged 1,158-line `chat/mod.rs` with room for improvement. | Code Quality Report (Sprint 8) | P2 Medium |
+
 ## UI / Visual
 
 | # | Item | Description | Source | Priority |
 |---|------|-------------|--------|----------|
-| 1 | Colorful TUI theme | Make the screen colorful — richer color palette, syntax highlighting for code blocks, distinct colors per user, vibrant room/panel styling. Move beyond the current minimal theme. | User request (Sprint 6) | P2 Medium |
+| 1 | ~~Colorful TUI theme~~ | ~~Make the screen colorful~~ | ~~User request (Sprint 6)~~ | ~~Done (Sprint 8, WP-5)~~ |
 
 ## Agent Integration
 
@@ -33,5 +39,7 @@ Items not assigned to a sprint yet. Pull from here when planning future work.
 
 | # | Item | Description | Source | Priority |
 |---|------|-------------|--------|----------|
-| 8 | Centralized config system | Runtime settings for heartbeat intervals, timeouts, relay URLs, etc. (TOML config file) | Sprint 6 retro / Blueprint Phase 8 | P2 Medium |
+| 8 | ~~Centralized config system~~ | ~~Runtime settings for heartbeat intervals, timeouts, relay URLs, etc. (TOML config file)~~ | ~~Sprint 6 retro / Blueprint Phase 8~~ | ~~Done (Sprint 8, UC-011)~~ |
 | 9 | Automated cargo clippy hook for builder agents | Pre-task-completion hook that runs clippy automatically | Sprint 6 retro | P3 Low |
+| 11 | Auto-reconnect for relay transport | Reconnect to relay on disconnect with exponential backoff. Orphaned worktree with partial implementation exists at `feature/uc-011-reconnect`. | Sprint 8 retro | P2 Medium |
+| 12 | `/session-handoff` command | Command that writes session state to a file for the next Claude session to read, enabling clean cross-session continuity. | Sprint 8 retro | P3 Low |

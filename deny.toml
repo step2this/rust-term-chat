@@ -92,9 +92,13 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "BSD-1-Clause",
     "ISC",
     "Unicode-3.0",
     "Zlib",
+    "BSL-1.0",
+    "MPL-2.0",
+    "Unlicense",
     "CDLA-Permissive-2.0",
 ]
 # The confidence threshold for detecting a license from license text.
@@ -146,7 +150,7 @@ registries = [
 # https://embarkstudios.github.io/cargo-deny/checks/bans/cfg.html
 [bans]
 # Lint level for when multiple versions of the same crate are detected
-multiple-versions = "warn"
+multiple-versions = "deny"
 # Lint level for when a crate version requirement is `*`
 wildcards = "allow"
 # The graph highlighting used when creating dotgraphs for crates
@@ -205,17 +209,41 @@ deny = [
 #exact = true
 
 # Certain crates/versions that will be skipped when doing duplicate detection.
+# Each entry documents why the duplicate cannot be eliminated.
 skip = [
-    #"ansi_term@0.11.0",
-    #{ crate = "ansi_term@0.11.0", reason = "you can specify a reason why it can't be updated/removed" },
+    # snow v0.9 and x25519-dalek v2 depend on rand_core 0.6 (and thus getrandom 0.2),
+    # while quinn/tungstenite/proptest use rand_core 0.9 (getrandom 0.3).
+    # Blocked until snow and x25519-dalek release versions supporting rand_core 0.9.
+    { crate = "rand_core@0.6", reason = "snow 0.9 and x25519-dalek 2 pin rand_core 0.6; awaiting upstream update" },
+    { crate = "getrandom@0.2", reason = "transitive via rand_core 0.6 (snow, x25519-dalek); awaiting upstream update" },
+
+    # ratatui 0.29 uses lru which depends on hashbrown 0.15,
+    # while toml uses indexmap which depends on hashbrown 0.16.
+    { crate = "hashbrown@0.15", reason = "ratatui -> lru pins hashbrown 0.15; toml -> indexmap uses 0.16" },
+
+    # ratatui 0.29 uses unicode-truncate with unicode-width 0.1,
+    # and also directly uses unicode-width 0.2.
+    { crate = "unicode-width@0.1", reason = "ratatui -> unicode-truncate pins unicode-width 0.1; ratatui also uses 0.2" },
+
+    # quinn -> rustls-platform-verifier -> jni pins thiserror 1.x;
+    # our workspace and most other deps use thiserror 2.x.
+    { crate = "thiserror@1", reason = "quinn -> rustls-platform-verifier -> jni pins thiserror 1.x" },
+    { crate = "thiserror-impl@1", reason = "proc-macro for thiserror 1.x (see thiserror@1 skip)" },
+
 ]
 # Similarly to `skip` allows you to skip certain crates during duplicate
 # detection. Unlike skip, it also includes the entire tree of transitive
 # dependencies starting at the specified crate, up to a certain depth, which is
 # by default infinite.
 skip-tree = [
-    #"ansi_term@0.11.0", # will be skipped along with _all_ of its direct and transitive dependencies
-    #{ crate = "ansi_term@0.11.0", depth = 20 },
+    # Windows ecosystem version churn: jni (0.45), ring (0.52), crossterm/rustix (0.59),
+    # tokio/quinn-udp (0.60), and clap/tracing (0.61) each pull different windows-sys
+    # versions. These are target-specific crates with zero-cost on non-Windows builds.
+    # Skipping the entire tree avoids enumerating every arch-specific sub-crate.
+    { crate = "windows-sys@0.45", reason = "windows version churn: jni pins 0.45" },
+    { crate = "windows-sys@0.52", reason = "windows version churn: ring pins 0.52" },
+    { crate = "windows-sys@0.59", reason = "windows version churn: crossterm/rustix pins 0.59" },
+    { crate = "windows-sys@0.60", reason = "windows version churn: tokio/quinn-udp pins 0.60" },
 ]
 
 # This section is considered when running `cargo deny check sources`.

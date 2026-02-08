@@ -3,6 +3,19 @@
 //! Implements Last-Write-Wins (LWW) merge logic that guarantees
 //! commutativity, associativity, and idempotency for convergent
 //! task state across peers.
+//!
+//! ## CRDT Library Evaluation (UC-013, 2026-02-08)
+//!
+//! Evaluated `crdts` crate (v7.3.2) as a replacement for this module.
+//! Decision: **keep hand-rolled implementation**. Rationale:
+//!
+//! - `crdts` pulls in 32 transitive dependencies (`num`, `quickcheck`,
+//!   `env_logger`, `regex`, `rand` 0.8) -- unacceptable weight for LWW registers.
+//! - This module is 87 lines of focused LWW logic with 22 unit tests
+//!   covering commutativity, associativity, and idempotency.
+//! - Our tiebreaking semantics (timestamp-then-author) are purpose-built
+//!   for the task sync protocol; `crdts` uses different conflict resolution.
+//! - Zero external dependencies beyond `termchat-proto` types.
 
 use std::collections::HashMap;
 use std::hash::BuildHasher;

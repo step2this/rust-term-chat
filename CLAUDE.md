@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project State
 
-Active development. Three-crate workspace is initialized and building. Completed: UC-001 (Send), UC-002 (Receive), UC-005 (E2E Handshake), UC-003 (P2P Connection), UC-004 (Relay Fallback), UC-006 (Create Room), UC-007 (Agent Join), UC-008 (Share Task List), UC-009 (Typing & Presence), UC-010 (Live Relay Messaging), UC-011 (Auto-Reconnect), UC-012 (Polish for Ship), Phase 1 (Hello Ratatui TUI). Phase 7 (Task Coordination) complete. Sprint 8 (Polish & Ship) complete: clap CLI args, TOML config file, tracing-to-file logging, theme enhancement, GitHub Actions CI, package metadata. UC-011 adds supervisor pattern with exponential backoff, message queuing during disconnect, and flap detection.
+Active development. Three-crate workspace is initialized and building. Completed: UC-001 through UC-013 (Send, Receive, P2P, Relay, E2E, Rooms, Agent, Tasks, Presence, Live Relay, Auto-Reconnect, Polish, Dependency Hygiene), Phase 1 (Hello Ratatui TUI). Sprint 9 (Hardening) complete: cargo-deny audit with deny.toml policy, rand 0.8→0.9 upgrade, CI cargo-deny enforcement, CRDT evaluation documented. 685 tests passing.
 
 ## Build & Development Commands
 
@@ -35,7 +35,7 @@ cargo fmt --check
 cargo clippy -- -D warnings
 
 # Full quality gate (run before committing)
-cargo fmt --check && cargo clippy -- -D warnings && cargo test
+cargo fmt --check && cargo clippy -- -D warnings && cargo test && cargo deny check
 ```
 
 ## Architecture Quick Reference
@@ -160,6 +160,13 @@ Cockburn-style use cases in `docs/use-cases/`. Always check the relevant use cas
 - Layered config (CLI > config file > env > defaults) via clap `env` attribute + `#[serde(default)]` TOML structs is a clean pattern with zero boilerplate
 - Cross-session work MUST use `docs/tasks/uc-NNN-tasks.md` for progress tracking — task files are external memory that survives context kills and session boundaries
 - When continuing from a prior session, read task files FIRST before examining code — avoids wasting 20-30% of context budget on archaeology
+- Apply all related edits to a file atomically to avoid linter revert thrashing — plan edits first, then apply in one pass
+- Always run `/uc-review` and fix issues BEFORE `/task-decompose` — review catches fabricated examples, broken references, and impossible postconditions that waste implementation time
+- Use background subagents for read-only analysis (review, decompose) while lead does housekeeping — parallelize analysis, serialize execution
+- Don't create worktrees speculatively — only when you're about to write code on a feature branch. Orphaned worktrees are a recurring anti-pattern
+- The 20 tool-call guideline is per-task, not per-UC — a UC with 12 tasks at ~6 calls each is fine
+- Update docs (UC registry, sprint doc, backlog) as part of the sprint commit, not as a separate cleanup task — doc debt compounds silently
+- `cargo deny check` is now part of the quality gate; `deny.toml` at workspace root defines license allowlist and duplicate skip list
 - Apply all related edits to a file atomically to avoid linter revert thrashing (e.g., add import + struct field + usage in one pass, not sequentially)
 - TCP proxy pattern for testing network failures — place a proxy between client and server, abort proxy tasks to simulate disconnect (causes immediate RST on both ends). `relay_handle.abort()` does NOT close existing WebSocket connections because axum handler tasks are independently spawned
 - In async shared-state code, always try-then-fallback, never check-then-act (TOCTOU race). E.g., try `send_message()`, queue on failure — don't check `is_connected` then send

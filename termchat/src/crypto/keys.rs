@@ -29,8 +29,7 @@ impl Identity {
     /// Returns [`CryptoError::KeyGenerationFailed`] if the CSPRNG fails
     /// or if snow's key generation fails.
     pub fn generate() -> Result<Self, CryptoError> {
-        use rand::rngs::OsRng;
-        let secret = x25519_dalek::StaticSecret::random_from_rng(OsRng);
+        let secret = x25519_dalek::StaticSecret::random_from_rng(rand_core::OsRng);
         let public = x25519_dalek::PublicKey::from(&secret);
         Ok(Self {
             private_key: secret.to_bytes().to_vec(),
