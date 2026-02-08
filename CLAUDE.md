@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project State
 
-Active development. Three-crate workspace is initialized and building. Completed: UC-001 (Send), UC-002 (Receive), UC-005 (E2E Handshake), UC-003 (P2P Connection), UC-004 (Relay Fallback), UC-006 (Create Room), UC-007 (Agent Join), UC-008 (Share Task List), UC-009 (Typing & Presence), UC-010 (Live Relay Messaging), UC-012 (Polish for Ship), Phase 1 (Hello Ratatui TUI). Phase 7 (Task Coordination) complete. Sprint 8 (Polish & Ship) complete: clap CLI args, TOML config file, tracing-to-file logging, theme enhancement, GitHub Actions CI, package metadata.
+Active development. Three-crate workspace is initialized and building. Completed: UC-001 (Send), UC-002 (Receive), UC-005 (E2E Handshake), UC-003 (P2P Connection), UC-004 (Relay Fallback), UC-006 (Create Room), UC-007 (Agent Join), UC-008 (Share Task List), UC-009 (Typing & Presence), UC-010 (Live Relay Messaging), UC-011 (Auto-Reconnect), UC-012 (Polish for Ship), Phase 1 (Hello Ratatui TUI). Phase 7 (Task Coordination) complete. Sprint 8 (Polish & Ship) complete: clap CLI args, TOML config file, tracing-to-file logging, theme enhancement, GitHub Actions CI, package metadata. UC-011 adds supervisor pattern with exponential backoff, message queuing during disconnect, and flap detection.
 
 ## Build & Development Commands
 
@@ -27,6 +27,7 @@ cargo test --test task_sync              # UC-008 integration test
 cargo test --test agent_bridge           # UC-007 integration test
 cargo test --test presence_typing        # UC-009 integration test
 cargo test --test tui_net_wiring         # UC-010 integration test
+cargo test --test relay_reconnect        # UC-011 integration test
 cargo test -p termchat-relay             # relay server unit tests
 cargo test --lib                         # unit tests only
 cargo test -p termchat-proto             # proto crate tests only
@@ -111,7 +112,7 @@ When running multi-agent teams, assign module ownership to prevent merge conflic
 - Rust edition 2024
 - All public functions must have doc comments
 - No `unwrap()` in production code — use `Result` with `thiserror`
-- Commit after each completed use case, not after each file change
+- Commit after each completed use case, not after each file change — never bundle multiple UCs into one commit
 - Always run `/task-decompose` before implementing, even for small use cases
 - Always include a reviewer agent in team configurations
 - Keep agent tasks scoped to <20 tool calls to avoid context kills
@@ -157,3 +158,9 @@ Cockburn-style use cases in `docs/use-cases/`. Always check the relevant use cas
 - Add workspace dependencies to root Cargo.toml BEFORE spawning parallel agents — prevents Cargo.toml merge conflicts
 - `cargo clippy --fix --allow-dirty` handles most lint auto-fixes; `private_interfaces` lint requires manual visibility adjustment
 - Layered config (CLI > config file > env > defaults) via clap `env` attribute + `#[serde(default)]` TOML structs is a clean pattern with zero boilerplate
+- Cross-session work MUST use `docs/tasks/uc-NNN-tasks.md` for progress tracking — task files are external memory that survives context kills and session boundaries
+- When continuing from a prior session, read task files FIRST before examining code — avoids wasting 20-30% of context budget on archaeology
+- Apply all related edits to a file atomically to avoid linter revert thrashing (e.g., add import + struct field + usage in one pass, not sequentially)
+- TCP proxy pattern for testing network failures — place a proxy between client and server, abort proxy tasks to simulate disconnect (causes immediate RST on both ends). `relay_handle.abort()` does NOT close existing WebSocket connections because axum handler tasks are independently spawned
+- In async shared-state code, always try-then-fallback, never check-then-act (TOCTOU race). E.g., try `send_message()`, queue on failure — don't check `is_connected` then send
+- Gate merge on reviewer approval — do not merge feature branch before review completes
