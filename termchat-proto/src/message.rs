@@ -301,6 +301,10 @@ pub enum Envelope {
     Nack(Nack),
     /// A handshake message (opaque bytes, interpreted by the crypto layer).
     Handshake(Vec<u8>),
+    /// A presence status update (opaque bytes, decoded by the application layer).
+    PresenceUpdate(Vec<u8>),
+    /// A typing indicator (opaque bytes, decoded by the application layer).
+    TypingIndicator(Vec<u8>),
 }
 
 #[cfg(test)]
@@ -396,6 +400,30 @@ mod tests {
             assert_eq!(inner, data);
         } else {
             panic!("expected Handshake envelope");
+        }
+    }
+
+    #[test]
+    fn envelope_presence_update_variant() {
+        let data = vec![0x10, 0x20];
+        let envelope = Envelope::PresenceUpdate(data.clone());
+
+        if let Envelope::PresenceUpdate(inner) = envelope {
+            assert_eq!(inner, data);
+        } else {
+            panic!("expected PresenceUpdate envelope");
+        }
+    }
+
+    #[test]
+    fn envelope_typing_indicator_variant() {
+        let data = vec![0x30, 0x40];
+        let envelope = Envelope::TypingIndicator(data.clone());
+
+        if let Envelope::TypingIndicator(inner) = envelope {
+            assert_eq!(inner, data);
+        } else {
+            panic!("expected TypingIndicator envelope");
         }
     }
 

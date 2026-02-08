@@ -58,3 +58,7 @@ path = "../tests/integration/room_management.rs"
 [[test]]
 name = "agent_bridge"
 path = "../tests/integration/agent_bridge.rs"
+
+[[test]]
+name = "presence_typing"
+path = "../tests/integration/presence_typing.rs"

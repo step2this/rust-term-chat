@@ -3,5 +3,7 @@
 pub mod agent;
 pub mod codec;
 pub mod message;
+pub mod presence;
 pub mod relay;
 pub mod room;
+pub mod typing;

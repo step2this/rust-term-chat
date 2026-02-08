@@ -26,6 +26,15 @@ pub const ERROR: Color = Color::Red;
 /// Agent indicator color.
 pub const AGENT: Color = Color::LightMagenta;
 
+/// Presence: online indicator color.
+pub const PRESENCE_ONLINE: Color = Color::Green;
+
+/// Presence: away indicator color.
+pub const PRESENCE_AWAY: Color = Color::Yellow;
+
+/// Presence: offline indicator color.
+pub const PRESENCE_OFFLINE: Color = Color::DarkGray;
+
 /// Color for sender names in chat.
 pub const SENDER_COLORS: [Color; 6] = [
     Color::Cyan,
