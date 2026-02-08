@@ -59,6 +59,11 @@ struct NetworkFileConfig {
     connect_timeout_secs: Option<u64>,
     register_timeout_secs: Option<u64>,
     channel_capacity: Option<usize>,
+    reconnect_initial_delay_ms: Option<u64>,
+    reconnect_max_delay_ms: Option<u64>,
+    reconnect_max_attempts: Option<u32>,
+    reconnect_stability_threshold_secs: Option<u64>,
+    reconnect_message_queue_cap: Option<usize>,
 }
 
 /// `[chat]` section of the config file.
@@ -116,6 +121,33 @@ impl Default for ChatConfig {
     }
 }
 
+/// Reconnection configuration for the networking supervisor.
+#[derive(Debug, Clone)]
+pub struct ReconnectConfig {
+    /// Initial delay before the first reconnect attempt.
+    pub initial_delay: Duration,
+    /// Maximum delay between reconnect attempts (backoff cap).
+    pub max_delay: Duration,
+    /// Maximum number of reconnect attempts before entering dormant mode.
+    pub max_attempts: u32,
+    /// Minimum connection duration to consider stable (resets backoff).
+    pub stability_threshold: Duration,
+    /// Maximum number of messages to queue during disconnection.
+    pub message_queue_cap: usize,
+}
+
+impl Default for ReconnectConfig {
+    fn default() -> Self {
+        Self {
+            initial_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(30),
+            max_attempts: 10,
+            stability_threshold: Duration::from_secs(30),
+            message_queue_cap: 100,
+        }
+    }
+}
+
 /// Fully resolved client configuration.
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
@@ -155,6 +187,10 @@ pub struct ClientConfig {
     /// Maximum task title length in characters.
     pub max_task_title_len: usize,
 
+    // -- Reconnect --
+    /// Reconnection configuration (backoff, retries, queue).
+    pub reconnect: ReconnectConfig,
+
     // -- Agent --
     /// Directory for agent Unix sockets.
     pub agent_socket_dir: String,
@@ -174,6 +210,7 @@ impl Default for ClientConfig {
             ack_retries: 1,
             chat: ChatConfig::default(),
             chat_event_buffer: 64,
+            reconnect: ReconnectConfig::default(),
             poll_timeout: Duration::from_millis(50),
             typing_timeout_secs: 3,
             timestamp_format: "%H:%M".to_string(),
@@ -255,6 +292,28 @@ impl ClientConfig {
                 .chat
                 .chat_event_buffer
                 .unwrap_or(defaults.chat_event_buffer),
+            reconnect: ReconnectConfig {
+                initial_delay: file
+                    .network
+                    .reconnect_initial_delay_ms
+                    .map_or(defaults.reconnect.initial_delay, Duration::from_millis),
+                max_delay: file
+                    .network
+                    .reconnect_max_delay_ms
+                    .map_or(defaults.reconnect.max_delay, Duration::from_millis),
+                max_attempts: file
+                    .network
+                    .reconnect_max_attempts
+                    .unwrap_or(defaults.reconnect.max_attempts),
+                stability_threshold: file
+                    .network
+                    .reconnect_stability_threshold_secs
+                    .map_or(defaults.reconnect.stability_threshold, Duration::from_secs),
+                message_queue_cap: file
+                    .network
+                    .reconnect_message_queue_cap
+                    .unwrap_or(defaults.reconnect.message_queue_cap),
+            },
             poll_timeout: file
                 .ui
                 .poll_timeout_ms
@@ -301,6 +360,7 @@ impl ClientConfig {
             remote_peer_id,
             channel_capacity: self.channel_capacity,
             chat_event_buffer: self.chat_event_buffer,
+            reconnect: self.reconnect.clone(),
         })
     }
 }
@@ -535,6 +595,43 @@ peer_id = "file-peer"
         assert_eq!(net.remote_peer_id, "bob");
         assert_eq!(net.channel_capacity, 256);
         assert_eq!(net.chat_event_buffer, 64);
+        assert_eq!(net.reconnect.max_attempts, 10);
+        assert_eq!(net.reconnect.initial_delay, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn reconnect_config_defaults() {
+        let rc = ReconnectConfig::default();
+        assert_eq!(rc.initial_delay, Duration::from_secs(1));
+        assert_eq!(rc.max_delay, Duration::from_secs(30));
+        assert_eq!(rc.max_attempts, 10);
+        assert_eq!(rc.stability_threshold, Duration::from_secs(30));
+        assert_eq!(rc.message_queue_cap, 100);
+    }
+
+    #[test]
+    fn toml_reconnect_config_override() {
+        let toml_str = r#"
+[network]
+relay_url = "ws://example.com:9000/ws"
+reconnect_initial_delay_ms = 500
+reconnect_max_delay_ms = 10000
+reconnect_max_attempts = 5
+reconnect_stability_threshold_secs = 15
+reconnect_message_queue_cap = 50
+"#;
+        let file: ConfigFile = toml::from_str(toml_str).unwrap();
+        let cli = CliArgs::default();
+        let config = ClientConfig::resolve(&cli, &file);
+
+        assert_eq!(config.reconnect.initial_delay, Duration::from_millis(500));
+        assert_eq!(config.reconnect.max_delay, Duration::from_millis(10_000));
+        assert_eq!(config.reconnect.max_attempts, 5);
+        assert_eq!(
+            config.reconnect.stability_threshold,
+            Duration::from_secs(15)
+        );
+        assert_eq!(config.reconnect.message_queue_cap, 50);
     }
 
     #[test]

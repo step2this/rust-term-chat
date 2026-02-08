@@ -235,6 +235,19 @@ fn drain_net_events(app: &mut App, rx: &mut mpsc::Receiver<NetEvent>) {
                     app.push_system_message(format!("Disconnected from {transport_type}"));
                 }
             }
+            NetEvent::Reconnecting {
+                attempt,
+                max_attempts,
+            } => {
+                app.push_system_message(format!(
+                    "Reconnecting... (attempt {attempt}/{max_attempts})"
+                ));
+            }
+            NetEvent::ReconnectFailed => {
+                app.push_system_message(
+                    "Reconnection failed — will retry in background".to_string(),
+                );
+            }
             NetEvent::Error(msg) => {
                 app.push_system_message(format!("Network error: {msg}"));
             }
