@@ -142,7 +142,7 @@ The following are NOT part of this use case and will be addressed in future work
 - **Verification Command**: `cargo test --test room_management`
 - **Test File**: `tests/integration/room_management.rs`
 - **Depends On**: UC-001 (Send), UC-002 (Receive), UC-004 (Relay — needed for room registry and store-and-forward of join requests)
-- **Blocks**: UC-007 (Agent Join Chat)
+- **Blocks**: UC-007 (Agent Join Chat), UC-008 (Share Task List — tasks are room-scoped)
 - **Estimated Complexity**: L / ~3000 tokens per agent turn
 - **Agent Assignment**: Teammate:Builder (2 builders — room model + relay registry)
 

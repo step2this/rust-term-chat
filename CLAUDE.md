@@ -136,3 +136,6 @@ Cockburn-style use cases in `docs/use-cases/`. Always check the relevant use cas
 - Clippy pedantic warnings accumulate across parallel builder tracks — Phase 2C gate catches them, but per-task clippy is better
 - "Out of Scope" in use cases prevents scope creep during implementation — always list what is NOT included
 - Convergence patterns (e.g., CleanupContext) emerge from Cockburn extension analysis when multiple error paths need the same handling
+- Clone `self` fields before `get_*_mut()` calls to avoid borrow checker E0502: `let id = self.id.clone(); let item = self.get_mut(key)?;`
+- Lead must NOT edit builder-owned files — use SendMessage to request changes instead, to avoid duplicate/race conditions
+- When builders work on the same crate, run `cargo clippy` at workspace level (`cargo clippy -- -D warnings`), not per-crate

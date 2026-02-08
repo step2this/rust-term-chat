@@ -1,10 +1,13 @@
 //! Property-based serialization round-trip tests (T-001-18).
 //!
 //! Uses proptest to verify:
-//! 1. Any valid `ChatMessage` survives encode → decode round-trip.
-//! 2. Any valid `Envelope` survives encode → decode round-trip.
+//! 1. Any valid `ChatMessage` survives encode -> decode round-trip.
+//! 2. Any valid `Envelope` survives encode -> decode round-trip.
 //! 3. Random bytes never cause a panic in `decode` (returns `Err` gracefully).
-//! 4. Framed encode → decode round-trips correctly for any valid envelope.
+//! 4. Framed encode -> decode round-trips correctly for any valid envelope.
+//! 5. Any valid `Task` and `TaskSyncMessage` survive encode -> decode round-trip.
+
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use proptest::prelude::*;
 use termchat_proto::codec;
