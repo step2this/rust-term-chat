@@ -99,7 +99,7 @@ When running multi-agent teams, assign module ownership to prevent merge conflic
 - Always run `/task-decompose` before implementing, even for small use cases
 - Always include a reviewer agent in team configurations
 - Keep agent tasks scoped to <20 tool calls to avoid context kills
-- Builders must run `cargo fmt` before marking any task complete (not just at final gate)
+- Builders must run `cargo fmt` and `cargo clippy -p <crate> -- -D warnings` before marking any task complete (not just at final gate)
 - When spawning builder agents, include explicit "claim task #N immediately" in the prompt
 
 ## Test Strategy
@@ -126,3 +126,7 @@ Cockburn-style use cases in `docs/use-cases/`. Always check the relevant use cas
 - Serialization: use postcard (serde-only, no extra derives) over bincode. API: `postcard::to_allocvec()` / `postcard::from_bytes()`
 - Use parking_lot::Mutex instead of std::sync::Mutex — infallible lock(), no unwrap needed
 - When builders change function signatures (e.g., async→sync), integration test files may break — Lead must check cross-track test files in the integration gate
+- Cross-track dependencies are solvable with task ordering: instruct one builder to prioritize the shared task, give the other builder independent work meanwhile
+- Clippy pedantic warnings accumulate across parallel builder tracks — Phase 2C gate catches them, but per-task clippy is better
+- "Out of Scope" in use cases prevents scope creep during implementation — always list what is NOT included
+- Convergence patterns (e.g., CleanupContext) emerge from Cockburn extension analysis when multiple error paths need the same handling
