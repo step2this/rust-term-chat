@@ -1,6 +1,11 @@
 //! Application state and event handling.
 
+use std::collections::{HashMap, HashSet};
+use std::time::Instant;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+use termchat_proto::presence::PresenceStatus;
 
 /// Which panel is currently focused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,7 +120,12 @@ pub struct ConversationItem {
     pub last_message_preview: Option<String>,
     /// Whether this conversation represents an AI agent participant.
     pub is_agent: bool,
+    /// Presence status for DM conversations (None for rooms).
+    pub presence: Option<PresenceStatus>,
 }
+
+/// Duration after which typing indicator expires (3 seconds).
+const TYPING_TIMEOUT_SECS: u64 = 3;
 
 /// Main application state.
 pub struct App {
@@ -139,11 +149,20 @@ pub struct App {
     pub tasks: Vec<DisplayTask>,
     /// Currently selected task index.
     pub selected_task: usize,
+    /// Presence status per peer (`peer_id` -> status).
+    pub presence_map: HashMap<String, PresenceStatus>,
+    /// Typing peers per room (`room_id` -> set of typing peer names).
+    pub typing_peers: HashMap<String, HashSet<String>>,
+    /// When the local user last typed (for typing timeout detection).
+    pub typing_timer: Option<Instant>,
+    /// Whether the local user is currently shown as typing.
+    pub local_typing: bool,
 }
 
 impl App {
     /// Create a new application with demo data.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn new() -> Self {
         let conversations = vec![
             ConversationItem {
@@ -151,20 +170,34 @@ impl App {
                 unread_count: 0,
                 last_message_preview: Some("You: Working on TUI".to_string()),
                 is_agent: false,
+                presence: None,
             },
             ConversationItem {
                 name: "# dev".to_string(),
                 unread_count: 3,
                 last_message_preview: Some("Bob: Check out the PR".to_string()),
                 is_agent: false,
+                presence: None,
             },
             ConversationItem {
                 name: "@ Alice".to_string(),
                 unread_count: 1,
                 last_message_preview: Some("Alice: See you tomorrow!".to_string()),
                 is_agent: false,
+                presence: Some(PresenceStatus::Online),
             },
         ];
+
+        // Demo presence data
+        let mut presence_map = HashMap::new();
+        presence_map.insert("Alice".to_string(), PresenceStatus::Online);
+        presence_map.insert("Bob".to_string(), PresenceStatus::Away);
+
+        // Demo typing data — Alice is typing in general
+        let mut typing_peers = HashMap::new();
+        let mut general_typing = HashSet::new();
+        general_typing.insert("Alice".to_string());
+        typing_peers.insert("general".to_string(), general_typing);
 
         let messages = vec![
             DisplayMessage {
@@ -241,6 +274,10 @@ impl App {
             should_quit: false,
             tasks: Vec::new(),
             selected_task: 0,
+            presence_map,
+            typing_peers,
+            typing_timer: None,
+            local_typing: false,
         }
     }
 
@@ -275,9 +312,22 @@ impl App {
     /// Handle key event when input is focused.
     fn handle_input_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Enter => self.submit_message(),
-            KeyCode::Char(c) => self.enter_char(c),
-            KeyCode::Backspace => self.delete_char(),
+            KeyCode::Enter => {
+                self.stop_typing();
+                self.submit_message();
+            }
+            KeyCode::Char(c) => {
+                self.enter_char(c);
+                self.start_typing();
+            }
+            KeyCode::Backspace => {
+                self.delete_char();
+                if self.input.is_empty() {
+                    self.stop_typing();
+                } else {
+                    self.start_typing();
+                }
+            }
             KeyCode::Left => self.move_cursor_left(),
             KeyCode::Right => self.move_cursor_right(),
             KeyCode::Home => self.cursor_position = 0,
@@ -611,6 +661,67 @@ impl App {
         if self.selected_conversation < self.conversations.len().saturating_sub(1) {
             self.selected_conversation += 1;
         }
+    }
+
+    /// Mark the local user as typing (resets the typing timer).
+    fn start_typing(&mut self) {
+        self.typing_timer = Some(Instant::now());
+        self.local_typing = true;
+    }
+
+    /// Mark the local user as no longer typing.
+    const fn stop_typing(&mut self) {
+        self.typing_timer = None;
+        self.local_typing = false;
+    }
+
+    /// Check if the typing timer has expired and update state accordingly.
+    ///
+    /// Should be called on each tick of the event loop.
+    pub fn tick_typing(&mut self) {
+        if let Some(started) = self.typing_timer
+            && started.elapsed().as_secs() >= TYPING_TIMEOUT_SECS
+        {
+            self.stop_typing();
+        }
+    }
+
+    /// Update a peer's presence status.
+    pub fn set_peer_presence(&mut self, peer_id: &str, status: PresenceStatus) {
+        self.presence_map.insert(peer_id.to_string(), status);
+        // Update matching DM conversation items
+        let dm_prefix = format!("@ {peer_id}");
+        for conv in &mut self.conversations {
+            if conv.name == dm_prefix {
+                conv.presence = Some(status);
+            }
+        }
+    }
+
+    /// Set a remote peer as typing in a room.
+    pub fn set_peer_typing(&mut self, room_id: &str, peer_name: &str, is_typing: bool) {
+        let entry = self.typing_peers.entry(room_id.to_string()).or_default();
+        if is_typing {
+            entry.insert(peer_name.to_string());
+        } else {
+            entry.remove(peer_name);
+            if entry.is_empty() {
+                self.typing_peers.remove(room_id);
+            }
+        }
+    }
+
+    /// Get the typing peers for the currently selected conversation.
+    #[must_use]
+    pub fn current_typing_peers(&self) -> Vec<&str> {
+        if let Some(conv) = self.conversations.get(self.selected_conversation) {
+            // Extract room name from "# room_name" format
+            let room_id = conv.name.strip_prefix("# ").unwrap_or(&conv.name);
+            if let Some(peers) = self.typing_peers.get(room_id) {
+                return peers.iter().map(String::as_str).collect();
+            }
+        }
+        Vec::new()
     }
 }
 

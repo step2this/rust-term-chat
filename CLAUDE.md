@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project State
 
-Active development. Three-crate workspace is initialized and building. Completed: UC-001 (Send), UC-002 (Receive), UC-005 (E2E Handshake), UC-003 (P2P Connection), UC-004 (Relay Fallback), UC-006 (Create Room), UC-007 (Agent Join), UC-008 (Share Task List), Phase 1 (Hello Ratatui TUI). 621 tests passing. Phase 6 (Agent Integration) complete. Phase 7 (Task Coordination) complete. Code quality sprint done: migrated bincode→postcard, eliminated all production unwrap/expect, fixed clippy pedantic.
+Active development. Three-crate workspace is initialized and building. Completed: UC-001 (Send), UC-002 (Receive), UC-005 (E2E Handshake), UC-003 (P2P Connection), UC-004 (Relay Fallback), UC-006 (Create Room), UC-007 (Agent Join), UC-008 (Share Task List), UC-009 (Typing & Presence), Phase 1 (Hello Ratatui TUI). Phase 7 (Task Coordination) complete. Code quality sprint done: migrated bincode→postcard, eliminated all production unwrap/expect, fixed clippy pedantic.
 
 ## Build & Development Commands
 
@@ -14,7 +14,7 @@ Active development. Three-crate workspace is initialized and building. Completed
 cargo build
 cargo run                                # launch TUI client
 cargo run --bin termchat-relay           # relay server (ws://0.0.0.0:9000)
-cargo test                               # all tests (621)
+cargo test                               # all tests (UC-008 + UC-009 merged)
 cargo test --test send_receive           # UC-001/UC-002 integration test
 cargo test --test e2e_encryption         # UC-005 integration test
 cargo test --test p2p_connection         # UC-003 integration test
@@ -22,6 +22,7 @@ cargo test --test relay_fallback         # UC-004 integration test
 cargo test --test room_management        # UC-006 integration test
 cargo test --test task_sync              # UC-008 integration test
 cargo test --test agent_bridge           # UC-007 integration test
+cargo test --test presence_typing        # UC-009 integration test
 cargo test -p termchat-relay             # relay server unit tests
 cargo test --lib                         # unit tests only
 cargo test -p termchat-proto             # proto crate tests only
@@ -84,6 +85,8 @@ termchat-proto/src/
   agent.rs         # AgentInfo, AgentCapability proto types
   room.rs          # RoomMessage enum: RegisterRoom, UnregisterRoom, ListRooms, RoomList, JoinRequest, JoinApproved, JoinDenied, MembershipUpdate
   task.rs          # TaskId, LwwRegister<T>, Task, TaskStatus, TaskFieldUpdate, TaskSyncMessage, encode/decode
+  presence.rs      # PresenceStatus (Online/Away/Offline), PresenceMessage
+  typing.rs        # TypingMessage (peer_id, room_id, is_typing)
 ```
 
 ### File Ownership (for agent teams)
@@ -139,3 +142,6 @@ Cockburn-style use cases in `docs/use-cases/`. Always check the relevant use cas
 - Clone `self` fields before `get_*_mut()` calls to avoid borrow checker E0502: `let id = self.id.clone(); let item = self.get_mut(key)?;`
 - Lead must NOT edit builder-owned files — use SendMessage to request changes instead, to avoid duplicate/race conditions
 - When builders work on the same crate, run `cargo clippy` at workspace level (`cargo clippy -- -D warnings`), not per-crate
+- Git worktree (`git worktree add ../dir -b feature/uc-NNN`) enables parallel UC development without conflict risk — essential when two features touch overlapping files
+- Opaque envelope payloads (`Envelope::Feature(Vec<u8>)` with app-layer decode) scale indefinitely without bloating the wire format enum — standard pattern for domain-specific message types
+- Single-agent implementation is sufficient for medium-complexity UCs that follow established patterns; full Forge workflow (team, task-decompose) reserved for novel/high-complexity work

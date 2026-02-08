@@ -62,3 +62,7 @@ path = "../tests/integration/agent_bridge.rs"
 [[test]]
 name = "task_sync"
 path = "../tests/integration/task_sync.rs"
+
+[[test]]
+name = "presence_typing"
+path = "../tests/integration/presence_typing.rs"

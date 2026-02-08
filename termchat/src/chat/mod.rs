@@ -112,6 +112,22 @@ pub enum ChatEvent {
         /// Description of the clock skew.
         skew_description: String,
     },
+    /// A peer's presence status changed.
+    PresenceChanged {
+        /// The peer whose presence changed.
+        peer_id: String,
+        /// The new presence status.
+        status: termchat_proto::presence::PresenceStatus,
+    },
+    /// A peer's typing status changed.
+    TypingChanged {
+        /// The peer who started/stopped typing.
+        peer_id: String,
+        /// The room where typing is occurring.
+        room_id: String,
+        /// Whether the peer is currently typing.
+        is_typing: bool,
+    },
 }
 
 /// Manages the chat send/receive pipeline with status tracking and history.
@@ -523,6 +539,33 @@ impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
                 // Handshake: handled by the crypto layer (UC-005).
                 // TaskSync: handled by the tasks module (UC-008).
             }
+            Envelope::PresenceUpdate(data) => {
+                // Decode presence message and emit event to UI
+                if let Ok(presence_msg) =
+                    postcard::from_bytes::<termchat_proto::presence::PresenceMessage>(data)
+                {
+                    let _ = self.event_tx.try_send(ChatEvent::PresenceChanged {
+                        peer_id: presence_msg.peer_id,
+                        status: presence_msg.status,
+                    });
+                } else {
+                    tracing::warn!(peer = %from, "failed to decode presence message");
+                }
+            }
+            Envelope::TypingIndicator(data) => {
+                // Decode typing message and emit event to UI
+                if let Ok(typing_msg) =
+                    postcard::from_bytes::<termchat_proto::typing::TypingMessage>(data)
+                {
+                    let _ = self.event_tx.try_send(ChatEvent::TypingChanged {
+                        peer_id: typing_msg.peer_id,
+                        room_id: typing_msg.room_id,
+                        is_typing: typing_msg.is_typing,
+                    });
+                } else {
+                    tracing::warn!(peer = %from, "failed to decode typing message");
+                }
+            }
         }
 
         Ok(envelope)
@@ -577,6 +620,36 @@ impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
     #[must_use]
     pub const fn history(&self) -> Option<&ResilientHistoryWriter<S>> {
         self.history.as_ref()
+    }
+
+    /// Send a presence update to the connected peer.
+    ///
+    /// Presence messages are fire-and-forget: no ack is expected, and send
+    /// failures are logged but do not propagate errors.
+    pub async fn send_presence(&self, presence: &termchat_proto::presence::PresenceMessage) {
+        let Ok(data) = postcard::to_allocvec(presence) else {
+            tracing::warn!("failed to serialize presence message");
+            return;
+        };
+        let envelope = Envelope::PresenceUpdate(data);
+        if let Err(e) = self.send_envelope(&envelope, &self.peer_id).await {
+            tracing::debug!(error = %e, "failed to send presence update (fire-and-forget)");
+        }
+    }
+
+    /// Send a typing indicator to the connected peer.
+    ///
+    /// Typing indicators are fire-and-forget: no ack is expected, and send
+    /// failures are logged but do not propagate errors.
+    pub async fn send_typing(&self, typing: &termchat_proto::typing::TypingMessage) {
+        let Ok(data) = postcard::to_allocvec(typing) else {
+            tracing::warn!("failed to serialize typing message");
+            return;
+        };
+        let envelope = Envelope::TypingIndicator(data);
+        if let Err(e) = self.send_envelope(&envelope, &self.peer_id).await {
+            tracing::debug!(error = %e, "failed to send typing indicator (fire-and-forget)");
+        }
     }
 
     /// Internal: encrypt, serialize, and send an envelope to a peer.

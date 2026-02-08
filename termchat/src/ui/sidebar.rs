@@ -7,8 +7,19 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem},
 };
 
+use termchat_proto::presence::PresenceStatus;
+
 use super::theme;
 use crate::app::{App, PanelFocus};
+
+/// Get the presence dot symbol and color for a status.
+const fn presence_indicator(status: PresenceStatus) -> (&'static str, ratatui::style::Color) {
+    match status {
+        PresenceStatus::Online => ("\u{25cf}", theme::PRESENCE_ONLINE),
+        PresenceStatus::Away => ("\u{25cf}", theme::PRESENCE_AWAY),
+        PresenceStatus::Offline => ("\u{25cb}", theme::PRESENCE_OFFLINE),
+    }
+}
 
 /// Render the sidebar with the conversation list.
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
@@ -21,7 +32,16 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .map(|(idx, conv)| {
             let is_selected = idx == app.selected_conversation;
 
-            let mut spans = vec![Span::raw(&conv.name)];
+            let mut spans = Vec::new();
+
+            // Add presence dot for DM conversations
+            if let Some(status) = conv.presence {
+                let (dot, color) = presence_indicator(status);
+                spans.push(Span::styled(dot, theme::normal().fg(color)));
+                spans.push(Span::raw(" "));
+            }
+
+            spans.push(Span::raw(&conv.name));
 
             // Add agent badge if applicable
             if conv.is_agent {

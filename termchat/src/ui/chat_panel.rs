@@ -10,16 +10,35 @@ use ratatui::{
 use super::theme;
 use crate::app::{App, PanelFocus};
 
-/// Render the chat panel (messages + input box).
+/// Render the chat panel (messages + typing indicator + input box).
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
-    // Split into message area and input area
+    let typing_peers = app.current_typing_peers();
+    let has_typing = !typing_peers.is_empty();
+
+    // Split into message area, optional typing indicator, and input area
+    let constraints = if has_typing {
+        vec![
+            Constraint::Min(3),
+            Constraint::Length(1),
+            Constraint::Length(3),
+        ]
+    } else {
+        vec![Constraint::Min(3), Constraint::Length(3)]
+    };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(3)])
+        .constraints(constraints)
         .split(area);
 
     render_messages(frame, chunks[0], app);
-    render_input(frame, chunks[1], app);
+
+    if has_typing {
+        render_typing_indicator(frame, chunks[1], &typing_peers);
+        render_input(frame, chunks[2], app);
+    } else {
+        render_input(frame, chunks[1], app);
+    }
 }
 
 /// Render the message list.
@@ -79,6 +98,24 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &App) {
     let list = List::new(items).block(block);
 
     frame.render_widget(list, area);
+}
+
+/// Render the typing indicator line (e.g., "Alice is typing...").
+fn render_typing_indicator(frame: &mut Frame, area: Rect, typing_peers: &[&str]) {
+    let text = match typing_peers.len() {
+        0 => return,
+        1 => format!("{} is typing...", typing_peers[0]),
+        2 => format!("{} and {} are typing...", typing_peers[0], typing_peers[1]),
+        n => format!("{} and {} others are typing...", typing_peers[0], n - 1),
+    };
+
+    let line = Line::from(Span::styled(
+        format!("  {text}"),
+        theme::dimmed().add_modifier(ratatui::style::Modifier::ITALIC),
+    ));
+
+    let paragraph = Paragraph::new(line);
+    frame.render_widget(paragraph, area);
 }
 
 /// Render the input box.
