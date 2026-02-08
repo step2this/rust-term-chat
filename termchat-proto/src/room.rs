@@ -101,6 +101,12 @@ pub struct MemberInfo {
     pub display_name: String,
     /// Whether this member is a room admin.
     pub is_admin: bool,
+    /// Whether this member is an AI agent participant.
+    ///
+    /// Defaults to `false` for backward compatibility with existing
+    /// serialized data that predates agent support.
+    #[serde(default)]
+    pub is_agent: bool,
 }
 
 /// What changed in a membership update.
@@ -219,11 +225,13 @@ mod tests {
                     peer_id: "peer-alice".to_string(),
                     display_name: "Alice".to_string(),
                     is_admin: true,
+                    is_agent: false,
                 },
                 MemberInfo {
                     peer_id: "peer-bob".to_string(),
                     display_name: "Bob".to_string(),
                     is_admin: false,
+                    is_agent: false,
                 },
             ],
         };
@@ -305,6 +313,37 @@ mod tests {
         let bytes = encode(&msg).unwrap();
         let decoded = decode(&bytes).unwrap();
         assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn member_info_is_agent_round_trip() {
+        let member = MemberInfo {
+            peer_id: "agent:claude-1".to_string(),
+            display_name: "Claude".to_string(),
+            is_admin: false,
+            is_agent: true,
+        };
+        let bytes = postcard::to_allocvec(&member).expect("serialize");
+        let decoded: MemberInfo = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(member, decoded);
+        assert!(decoded.is_agent);
+    }
+
+    #[test]
+    fn member_info_is_agent_defaults_false() {
+        // Simulate data serialized before is_agent field existed.
+        // A MemberInfo with is_agent=false should produce identical bytes
+        // to the old 3-field struct (since postcard uses #[serde(default)]).
+        let member = MemberInfo {
+            peer_id: "peer-alice".to_string(),
+            display_name: "Alice".to_string(),
+            is_admin: true,
+            is_agent: false,
+        };
+        let bytes = postcard::to_allocvec(&member).expect("serialize");
+        let decoded: MemberInfo = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(member, decoded);
+        assert!(!decoded.is_agent);
     }
 
     #[test]

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project State
 
-Active development. Three-crate workspace is initialized and building. Completed: UC-001 (Send), UC-002 (Receive), UC-005 (E2E Handshake), UC-003 (P2P Connection), UC-004 (Relay Fallback), UC-006 (Create Room), Phase 1 (Hello Ratatui TUI). 340 tests passing. Phase 5 (Rooms) complete. Code quality sprint done: migrated bincode→postcard, eliminated all production unwrap/expect, fixed clippy pedantic.
+Active development. Three-crate workspace is initialized and building. Completed: UC-001 (Send), UC-002 (Receive), UC-005 (E2E Handshake), UC-003 (P2P Connection), UC-004 (Relay Fallback), UC-006 (Create Room), UC-007 (Agent Join), Phase 1 (Hello Ratatui TUI). 475 tests passing. Phase 5 (Rooms) complete. Phase 6 (Agent Integration) in progress. Code quality sprint done: migrated bincode→postcard, eliminated all production unwrap/expect, fixed clippy pedantic.
 
 ## Build & Development Commands
 
@@ -14,12 +14,13 @@ Active development. Three-crate workspace is initialized and building. Completed
 cargo build
 cargo run                                # launch TUI client
 cargo run --bin termchat-relay           # relay server (ws://0.0.0.0:9000)
-cargo test                               # all tests (340)
+cargo test                               # all tests (475)
 cargo test --test send_receive           # UC-001/UC-002 integration test
 cargo test --test e2e_encryption         # UC-005 integration test
 cargo test --test p2p_connection         # UC-003 integration test
 cargo test --test relay_fallback         # UC-004 integration test
 cargo test --test room_management        # UC-006 integration test
+cargo test --test agent_bridge           # UC-007 integration test
 cargo test -p termchat-relay             # relay server unit tests
 cargo test --lib                         # unit tests only
 cargo test -p termchat-proto             # proto crate tests only
@@ -41,9 +42,14 @@ Four layers: TUI (ratatui + crossterm) -> Application (chat/task/agent managers)
 ```
 termchat/src/
   main.rs          # TUI event loop (ratatui + crossterm)
-  lib.rs           # Crate root: pub mod app, chat, crypto, transport, ui
-  app.rs           # App state, key event handling, panel focus
+  lib.rs           # Crate root: pub mod agent, app, chat, crypto, transport, ui
+  app.rs           # App state, key event handling, panel focus, /invite-agent command
   ui/              # TUI rendering (sidebar, chat_panel, task_panel, status_bar, theme)
+  agent/
+    mod.rs         # AgentError enum (thiserror)
+    protocol.rs    # AgentMessage, BridgeMessage, JSON line encode/decode, validate_agent_id
+    bridge.rs      # AgentBridge (Unix socket listener), AgentConnection, heartbeat_loop
+    participant.rs # AgentParticipant (event loop, fan-out, room event forwarding)
   chat/
     mod.rs         # ChatManager: send/receive pipeline, ack tracking, events
     history.rs     # MessageStore trait, InMemoryStore, ResilientHistoryWriter
@@ -70,6 +76,7 @@ termchat-proto/src/
   message.rs       # Wire format types: ChatMessage, Envelope, DeliveryAck, Nack, etc.
   codec.rs         # Postcard encode/decode with length-prefix framing
   relay.rs         # RelayMessage enum: Register, Registered, RelayPayload, Queued, Error, Room
+  agent.rs         # AgentInfo, AgentCapability proto types
   room.rs          # RoomMessage enum: RegisterRoom, UnregisterRoom, ListRooms, RoomList, JoinRequest, JoinApproved, JoinDenied, MembershipUpdate
 ```
 
@@ -78,6 +85,7 @@ termchat-proto/src/
 When running multi-agent teams, assign module ownership to prevent merge conflicts:
 - **Lead only**: Root `Cargo.toml`, `termchat/Cargo.toml`, `CLAUDE.md`
 - **Builder-Proto**: `termchat-proto/`, `termchat/src/chat/`
+- **Builder-Agent**: `termchat/src/agent/`
 - **Builder-Infra**: `termchat/src/crypto/`, `termchat/src/transport/`
 - **Builder-TUI**: `termchat/src/ui/`, `termchat/src/app.rs`, `termchat/src/main.rs`
 - **Reviewer**: `tests/integration/`, `tests/property/`

@@ -69,6 +69,10 @@ pub enum RoomError {
     /// The peer is already a member of the room.
     #[error("peer {0} is already a member")]
     AlreadyMember(String),
+
+    /// The specified member was not found in the room.
+    #[error("member {0} not found in room")]
+    MemberNotFound(String),
 }
 
 /// Events emitted by the [`RoomManager`] for UI or application layer consumption.
@@ -105,6 +109,15 @@ pub enum RoomEvent {
         room_id: String,
         /// The denied peer's ID.
         peer_id: String,
+    },
+    /// A member left or was removed from the room.
+    MemberLeft {
+        /// The room that lost a member.
+        room_id: String,
+        /// The departed member's peer ID.
+        peer_id: String,
+        /// The departed member's display name.
+        display_name: String,
     },
 }
 
@@ -204,6 +217,7 @@ impl RoomManager {
             peer_id: admin_peer_id.to_string(),
             display_name: admin_display_name.to_string(),
             is_admin: true,
+            is_agent: false,
         };
 
         let room = Room {
@@ -353,6 +367,7 @@ impl RoomManager {
             peer_id: peer_id.to_string(),
             display_name: display_name.clone(),
             is_admin: false,
+            is_agent: false,
         };
 
         // Must re-borrow mutably after the immutable borrow above
@@ -458,6 +473,96 @@ impl RoomManager {
     #[must_use]
     pub fn list_rooms(&self) -> Vec<&Room> {
         self.rooms.values().collect()
+    }
+
+    /// Directly adds a member to a room, bypassing the join-request queue.
+    ///
+    /// This is used for agent invites and other cases where admin approval
+    /// has already been granted. If the member is already present, the call
+    /// is idempotent and returns the current member list.
+    ///
+    /// Emits a [`RoomEvent::MemberJoined`] on success (not on duplicate).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RoomError`] if:
+    /// - The room doesn't exist ([`RoomError::RoomNotFound`])
+    /// - The room is full ([`RoomError::RoomFull`])
+    pub fn add_member(
+        &mut self,
+        room_id: &str,
+        member: MemberInfo,
+    ) -> Result<Vec<MemberInfo>, RoomError> {
+        let room = self
+            .rooms
+            .get(room_id)
+            .ok_or_else(|| RoomError::RoomNotFound(room_id.to_string()))?;
+
+        // Idempotent: already a member
+        if room.members.iter().any(|m| m.peer_id == member.peer_id) {
+            return Ok(room.members.clone());
+        }
+
+        // Capacity check
+        if room.members.len() >= MAX_MEMBERS {
+            return Err(RoomError::RoomFull);
+        }
+
+        let peer_id = member.peer_id.clone();
+        let display_name = member.display_name.clone();
+
+        // Re-borrow mutably
+        let room = self
+            .rooms
+            .get_mut(room_id)
+            .ok_or_else(|| RoomError::RoomNotFound(room_id.to_string()))?;
+        room.members.push(member);
+        let members = room.members.clone();
+
+        let _ = self.event_sender.try_send(RoomEvent::MemberJoined {
+            room_id: room_id.to_string(),
+            peer_id,
+            display_name,
+        });
+
+        Ok(members)
+    }
+
+    /// Removes a member from a room by their peer ID.
+    ///
+    /// Returns the removed [`MemberInfo`]. Emits a [`RoomEvent::MemberLeft`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RoomError`] if:
+    /// - The room doesn't exist ([`RoomError::RoomNotFound`])
+    /// - The member is not in the room ([`RoomError::MemberNotFound`])
+    pub fn remove_member(&mut self, room_id: &str, peer_id: &str) -> Result<MemberInfo, RoomError> {
+        let room = self
+            .rooms
+            .get(room_id)
+            .ok_or_else(|| RoomError::RoomNotFound(room_id.to_string()))?;
+
+        let pos = room
+            .members
+            .iter()
+            .position(|m| m.peer_id == peer_id)
+            .ok_or_else(|| RoomError::MemberNotFound(peer_id.to_string()))?;
+
+        // Re-borrow mutably
+        let room = self
+            .rooms
+            .get_mut(room_id)
+            .ok_or_else(|| RoomError::RoomNotFound(room_id.to_string()))?;
+        let removed = room.members.remove(pos);
+
+        let _ = self.event_sender.try_send(RoomEvent::MemberLeft {
+            room_id: room_id.to_string(),
+            peer_id: peer_id.to_string(),
+            display_name: removed.display_name.clone(),
+        });
+
+        Ok(removed)
     }
 }
 
@@ -925,5 +1030,192 @@ mod tests {
 
         let result = mgr.handle_join_request(&room.room_id, "peer-bob", "Bob");
         assert_eq!(result, Err(RoomError::NotAdmin(room.room_id.clone())));
+    }
+
+    // --- add_member tests ---
+
+    #[test]
+    fn add_member_success() {
+        let (mut mgr, mut rx) = RoomManager::new();
+        let room = mgr.create_room("General", "peer-alice", "Alice").unwrap();
+        let _ = rx.try_recv(); // drain RoomCreated
+
+        let agent = MemberInfo {
+            peer_id: "agent:helper".to_string(),
+            display_name: "Helper Bot".to_string(),
+            is_admin: false,
+            is_agent: true,
+        };
+        let members = mgr.add_member(&room.room_id, agent).unwrap();
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[1].peer_id, "agent:helper");
+        assert!(members[1].is_agent);
+
+        let event = rx.try_recv().unwrap();
+        assert_eq!(
+            event,
+            RoomEvent::MemberJoined {
+                room_id: room.room_id.clone(),
+                peer_id: "agent:helper".to_string(),
+                display_name: "Helper Bot".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn add_member_duplicate_idempotent() {
+        let (mut mgr, mut rx) = RoomManager::new();
+        let room = mgr.create_room("General", "peer-alice", "Alice").unwrap();
+        let _ = rx.try_recv(); // drain RoomCreated
+
+        let agent = MemberInfo {
+            peer_id: "agent:helper".to_string(),
+            display_name: "Helper Bot".to_string(),
+            is_admin: false,
+            is_agent: true,
+        };
+        mgr.add_member(&room.room_id, agent.clone()).unwrap();
+        let _ = rx.try_recv(); // drain first MemberJoined
+
+        // Second add is idempotent — returns Ok with current members
+        let members = mgr.add_member(&room.room_id, agent).unwrap();
+        assert_eq!(members.len(), 2);
+
+        // No second MemberJoined event
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn add_member_room_not_found() {
+        let (mut mgr, _rx) = RoomManager::new();
+        let agent = MemberInfo {
+            peer_id: "agent:helper".to_string(),
+            display_name: "Helper Bot".to_string(),
+            is_admin: false,
+            is_agent: true,
+        };
+        let result = mgr.add_member("nonexistent", agent);
+        assert_eq!(
+            result,
+            Err(RoomError::RoomNotFound("nonexistent".to_string()))
+        );
+    }
+
+    #[test]
+    fn add_member_room_full() {
+        let (mut mgr, _rx) = RoomManager::new();
+        let room = mgr.create_room("Full Room", "peer-admin", "Admin").unwrap();
+
+        // Fill the room to capacity (admin is already member 1)
+        for i in 1..MAX_MEMBERS {
+            let member = MemberInfo {
+                peer_id: format!("peer-{i}"),
+                display_name: format!("User {i}"),
+                is_admin: false,
+                is_agent: false,
+            };
+            mgr.add_member(&room.room_id, member).unwrap();
+        }
+
+        // One more should fail
+        let overflow = MemberInfo {
+            peer_id: "peer-overflow".to_string(),
+            display_name: "Overflow".to_string(),
+            is_admin: false,
+            is_agent: false,
+        };
+        let result = mgr.add_member(&room.room_id, overflow);
+        assert_eq!(result, Err(RoomError::RoomFull));
+    }
+
+    // --- remove_member tests ---
+
+    #[test]
+    fn remove_member_success() {
+        let (mut mgr, mut rx) = RoomManager::new();
+        let room = mgr.create_room("General", "peer-alice", "Alice").unwrap();
+        let _ = rx.try_recv(); // drain RoomCreated
+
+        let agent = MemberInfo {
+            peer_id: "agent:helper".to_string(),
+            display_name: "Helper Bot".to_string(),
+            is_admin: false,
+            is_agent: true,
+        };
+        mgr.add_member(&room.room_id, agent).unwrap();
+        let _ = rx.try_recv(); // drain MemberJoined
+
+        let removed = mgr.remove_member(&room.room_id, "agent:helper").unwrap();
+        assert_eq!(removed.peer_id, "agent:helper");
+        assert_eq!(removed.display_name, "Helper Bot");
+        assert!(removed.is_agent);
+
+        // Verify the room now has only 1 member
+        let members = mgr.get_room_members(&room.room_id).unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].peer_id, "peer-alice");
+
+        let event = rx.try_recv().unwrap();
+        assert_eq!(
+            event,
+            RoomEvent::MemberLeft {
+                room_id: room.room_id.clone(),
+                peer_id: "agent:helper".to_string(),
+                display_name: "Helper Bot".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn remove_member_not_found() {
+        let (mut mgr, _rx) = RoomManager::new();
+        let room = mgr.create_room("General", "peer-alice", "Alice").unwrap();
+
+        let result = mgr.remove_member(&room.room_id, "peer-nobody");
+        assert_eq!(
+            result,
+            Err(RoomError::MemberNotFound("peer-nobody".to_string()))
+        );
+    }
+
+    #[test]
+    fn remove_member_room_not_found() {
+        let (mut mgr, _rx) = RoomManager::new();
+        let result = mgr.remove_member("nonexistent", "peer-alice");
+        assert_eq!(
+            result,
+            Err(RoomError::RoomNotFound("nonexistent".to_string()))
+        );
+    }
+
+    #[test]
+    fn remove_member_emits_event_with_display_name() {
+        let (mut mgr, mut rx) = RoomManager::new();
+        let room = mgr.create_room("General", "peer-alice", "Alice").unwrap();
+        let _ = rx.try_recv(); // drain RoomCreated
+
+        let bob = MemberInfo {
+            peer_id: "peer-bob".to_string(),
+            display_name: "Bob".to_string(),
+            is_admin: false,
+            is_agent: false,
+        };
+        mgr.add_member(&room.room_id, bob).unwrap();
+        let _ = rx.try_recv(); // drain MemberJoined
+
+        mgr.remove_member(&room.room_id, "peer-bob").unwrap();
+        let event = rx.try_recv().unwrap();
+        match event {
+            RoomEvent::MemberLeft {
+                room_id,
+                peer_id,
+                display_name,
+            } => {
+                assert_eq!(room_id, room.room_id);
+                assert_eq!(peer_id, "peer-bob");
+                assert_eq!(display_name, "Bob");
+            }
+            other => panic!("expected MemberLeft, got {other:?}"),
+        }
     }
 }

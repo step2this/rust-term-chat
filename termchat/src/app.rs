@@ -63,6 +63,8 @@ pub struct ConversationItem {
     pub unread_count: usize,
     /// Preview of the last message.
     pub last_message_preview: Option<String>,
+    /// Whether this conversation represents an AI agent participant.
+    pub is_agent: bool,
 }
 
 /// Main application state.
@@ -94,16 +96,19 @@ impl App {
                 name: "# general".to_string(),
                 unread_count: 0,
                 last_message_preview: Some("You: Working on TUI".to_string()),
+                is_agent: false,
             },
             ConversationItem {
                 name: "# dev".to_string(),
                 unread_count: 3,
                 last_message_preview: Some("Bob: Check out the PR".to_string()),
+                is_agent: false,
             },
             ConversationItem {
                 name: "@ Alice".to_string(),
                 unread_count: 1,
                 last_message_preview: Some("Alice: See you tomorrow!".to_string()),
+                is_agent: false,
             },
         ];
 
@@ -260,9 +265,19 @@ impl App {
         };
     }
 
-    /// Submit the current input as a message.
+    /// Submit the current input as a message or handle a `/` command.
     fn submit_message(&mut self) {
         if self.input.trim().is_empty() {
+            return;
+        }
+
+        let trimmed = self.input.trim().to_string();
+
+        // Route slash commands
+        if trimmed.starts_with('/') {
+            self.handle_command(&trimmed);
+            self.input.clear();
+            self.cursor_position = 0;
             return;
         }
 
@@ -277,6 +292,60 @@ impl App {
         self.input.clear();
         self.cursor_position = 0;
 
+        // Auto-scroll to bottom
+        self.message_scroll = self.messages.len().saturating_sub(1);
+    }
+
+    /// Handle a `/` command from the input box.
+    fn handle_command(&mut self, input: &str) {
+        let parts: Vec<&str> = input.splitn(2, ' ').collect();
+        let command = parts[0];
+        let args = parts.get(1).copied().unwrap_or("").trim();
+
+        match command {
+            "/invite-agent" => self.handle_invite_agent(args),
+            _ => {
+                self.push_system_message(format!("Unknown command: {command}"));
+            }
+        }
+    }
+
+    /// Handle the `/invite-agent <room-name>` command.
+    ///
+    /// Validates that a room name was provided, looks up the room via
+    /// `RoomManager`, and initiates the agent bridge flow.
+    fn handle_invite_agent(&mut self, room_name: &str) {
+        if room_name.is_empty() {
+            self.push_system_message("Usage: /invite-agent <room-name>".to_string());
+            return;
+        }
+
+        // Room lookup will be wired to RoomManager once it's integrated
+        // into the App. For now, check conversations list as a placeholder.
+        let room_display = format!("# {room_name}");
+        let room_exists = self.conversations.iter().any(|c| c.name == room_display);
+
+        if !room_exists {
+            self.push_system_message(format!("Room '{room_name}' not found"));
+            return;
+        }
+
+        // Bridge spawning will be wired when AgentBridge is ready.
+        // For now, show the status message indicating the command was accepted.
+        let socket_path = format!("/tmp/termchat-agent-{}.sock", std::process::id());
+        self.push_system_message(format!(
+            "Agent bridge listening on {socket_path}. Waiting for agent to connect..."
+        ));
+    }
+
+    /// Push a system-generated status message into the chat panel.
+    pub fn push_system_message(&mut self, content: String) {
+        self.messages.push(DisplayMessage {
+            sender: "System".to_string(),
+            content,
+            timestamp: chrono::Local::now().format("%H:%M").to_string(),
+            status: MessageStatus::Delivered,
+        });
         // Auto-scroll to bottom
         self.message_scroll = self.messages.len().saturating_sub(1);
     }
@@ -341,5 +410,99 @@ impl App {
 impl Default for App {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: create an App and set its input, then submit.
+    fn submit_input(app: &mut App, text: &str) {
+        app.input = text.to_string();
+        app.cursor_position = text.len();
+        app.submit_message();
+    }
+
+    #[test]
+    fn invite_agent_no_args_shows_usage() {
+        let mut app = App::new();
+        let initial_count = app.messages.len();
+
+        submit_input(&mut app, "/invite-agent");
+
+        assert_eq!(app.messages.len(), initial_count + 1);
+        let last = &app.messages[app.messages.len() - 1];
+        assert_eq!(last.sender, "System");
+        assert!(last.content.contains("Usage:"));
+    }
+
+    #[test]
+    fn invite_agent_room_not_found() {
+        let mut app = App::new();
+        let initial_count = app.messages.len();
+
+        submit_input(&mut app, "/invite-agent nonexistent");
+
+        assert_eq!(app.messages.len(), initial_count + 1);
+        let last = &app.messages[app.messages.len() - 1];
+        assert_eq!(last.sender, "System");
+        assert!(last.content.contains("not found"));
+    }
+
+    #[test]
+    fn invite_agent_valid_room_shows_bridge_status() {
+        let mut app = App::new();
+        // App::new() has a "# general" conversation
+        let initial_count = app.messages.len();
+
+        submit_input(&mut app, "/invite-agent general");
+
+        assert_eq!(app.messages.len(), initial_count + 1);
+        let last = &app.messages[app.messages.len() - 1];
+        assert_eq!(last.sender, "System");
+        assert!(last.content.contains("Agent bridge listening on"));
+        assert!(last.content.contains("Waiting for agent to connect"));
+    }
+
+    #[test]
+    fn unknown_command_shows_error() {
+        let mut app = App::new();
+        let initial_count = app.messages.len();
+
+        submit_input(&mut app, "/foobar");
+
+        assert_eq!(app.messages.len(), initial_count + 1);
+        let last = &app.messages[app.messages.len() - 1];
+        assert_eq!(last.sender, "System");
+        assert!(last.content.contains("Unknown command: /foobar"));
+    }
+
+    #[test]
+    fn slash_command_clears_input() {
+        let mut app = App::new();
+        submit_input(&mut app, "/invite-agent general");
+        assert!(app.input.is_empty());
+        assert_eq!(app.cursor_position, 0);
+    }
+
+    #[test]
+    fn regular_message_not_treated_as_command() {
+        let mut app = App::new();
+        let initial_count = app.messages.len();
+
+        submit_input(&mut app, "hello world");
+
+        assert_eq!(app.messages.len(), initial_count + 1);
+        let last = &app.messages[app.messages.len() - 1];
+        assert_eq!(last.sender, "You");
+        assert_eq!(last.content, "hello world");
+    }
+
+    #[test]
+    fn system_message_auto_scrolls() {
+        let mut app = App::new();
+        app.push_system_message("test".to_string());
+        assert_eq!(app.message_scroll, app.messages.len() - 1);
     }
 }

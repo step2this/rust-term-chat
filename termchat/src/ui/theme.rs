@@ -23,6 +23,9 @@ pub const WARNING: Color = Color::Yellow;
 /// Error/offline indicator color.
 pub const ERROR: Color = Color::Red;
 
+/// Agent indicator color.
+pub const AGENT: Color = Color::LightMagenta;
+
 /// Color for sender names in chat.
 pub const SENDER_COLORS: [Color; 6] = [
     Color::Cyan,

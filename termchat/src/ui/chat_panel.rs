@@ -30,16 +30,35 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &App) {
         .messages
         .iter()
         .map(|msg| {
-            let sender_style = theme::normal().fg(theme::sender_color(&msg.sender));
             let timestamp_style = theme::dimmed();
             let status_style = theme::dimmed();
+            let is_agent = msg.sender.starts_with("agent:");
+
+            let (display_sender, sender_style) = if is_agent {
+                // Strip the "agent:" prefix and show [Agent] badge
+                let name = msg.sender.strip_prefix("agent:").unwrap_or(&msg.sender);
+                (format!("[Agent] {name}"), theme::normal().fg(theme::AGENT))
+            } else if msg.sender == "System" {
+                (msg.sender.clone(), theme::dimmed())
+            } else {
+                (
+                    msg.sender.clone(),
+                    theme::normal().fg(theme::sender_color(&msg.sender)),
+                )
+            };
+
+            let content_style = if msg.sender == "System" {
+                theme::dimmed()
+            } else {
+                theme::normal()
+            };
 
             let line = Line::from(vec![
                 Span::styled(&msg.timestamp, timestamp_style),
                 Span::raw(" "),
-                Span::styled(&msg.sender, sender_style),
+                Span::styled(display_sender, sender_style),
                 Span::raw(": "),
-                Span::styled(&msg.content, theme::normal()),
+                Span::styled(&msg.content, content_style),
                 Span::raw(" "),
                 Span::styled(msg.status.symbol(), status_style),
             ]);

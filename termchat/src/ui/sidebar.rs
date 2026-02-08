@@ -23,6 +23,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
             let mut spans = vec![Span::raw(&conv.name)];
 
+            // Add agent badge if applicable
+            if conv.is_agent {
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled("[A]", theme::normal().fg(theme::AGENT)));
+            }
+
             // Add unread badge if present
             if conv.unread_count > 0 {
                 spans.push(Span::raw(" "));
