@@ -124,8 +124,11 @@ pub struct ConversationItem {
     pub presence: Option<PresenceStatus>,
 }
 
-/// Duration after which typing indicator expires (3 seconds).
-const TYPING_TIMEOUT_SECS: u64 = 3;
+/// Default duration after which typing indicator expires (3 seconds).
+const DEFAULT_TYPING_TIMEOUT_SECS: u64 = 3;
+
+/// Default maximum task title length in characters.
+const DEFAULT_MAX_TASK_TITLE_LEN: usize = 256;
 
 /// Main application state.
 pub struct App {
@@ -157,6 +160,10 @@ pub struct App {
     pub typing_timer: Option<Instant>,
     /// Whether the local user is currently shown as typing.
     pub local_typing: bool,
+    /// Typing indicator timeout in seconds (configurable).
+    typing_timeout_secs: u64,
+    /// Maximum task title length in characters (configurable).
+    max_task_title_len: usize,
 }
 
 impl App {
@@ -278,7 +285,23 @@ impl App {
             typing_peers,
             typing_timer: None,
             local_typing: false,
+            typing_timeout_secs: DEFAULT_TYPING_TIMEOUT_SECS,
+            max_task_title_len: DEFAULT_MAX_TASK_TITLE_LEN,
         }
+    }
+
+    /// Set the typing indicator timeout in seconds.
+    #[must_use]
+    pub const fn with_typing_timeout(mut self, secs: u64) -> Self {
+        self.typing_timeout_secs = secs;
+        self
+    }
+
+    /// Set the maximum task title length in characters.
+    #[must_use]
+    pub const fn with_max_task_title_len(mut self, len: usize) -> Self {
+        self.max_task_title_len = len;
+        self
     }
 
     /// Handle a key event.
@@ -394,19 +417,16 @@ impl App {
         }
     }
 
-    /// Maximum task title length in characters.
-    const MAX_TASK_TITLE_LEN: usize = 256;
-
     /// `/task add <title>` — create a new task.
     fn task_cmd_add(&mut self, title: &str) {
         if title.is_empty() {
             self.push_system_message("Task title cannot be empty".to_string());
             return;
         }
-        if title.len() > Self::MAX_TASK_TITLE_LEN {
+        if title.len() > self.max_task_title_len {
             self.push_system_message(format!(
                 "Task title too long (max {} characters)",
-                Self::MAX_TASK_TITLE_LEN
+                self.max_task_title_len
             ));
             return;
         }
@@ -680,7 +700,7 @@ impl App {
     /// Should be called on each tick of the event loop.
     pub fn tick_typing(&mut self) {
         if let Some(started) = self.typing_timer
-            && started.elapsed().as_secs() >= TYPING_TIMEOUT_SECS
+            && started.elapsed().as_secs() >= self.typing_timeout_secs
         {
             self.stop_typing();
         }

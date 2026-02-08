@@ -18,6 +18,7 @@ use termchat_proto::message::{
     MessageStatus, Nack, NackReason, SenderId, Timestamp,
 };
 
+use crate::config::ChatConfig;
 use crate::crypto::{CryptoError, CryptoSession};
 use crate::transport::{PeerId, Transport, TransportError};
 
@@ -76,15 +77,6 @@ impl Default for RetryConfig {
         }
     }
 }
-
-/// Maximum allowed encrypted payload size before decryption (64 KB).
-const MAX_ENCRYPTED_PAYLOAD_SIZE: usize = 64 * 1024;
-
-/// Maximum size of the duplicate detection set.
-const MAX_DUPLICATE_TRACKING: usize = 10_000;
-
-/// Clock skew tolerance for timestamp validation (±5 minutes).
-const CLOCK_SKEW_TOLERANCE_MS: u64 = 5 * 60 * 1000;
 
 /// Events emitted by the [`ChatManager`] for UI notification.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,10 +150,13 @@ pub struct ChatManager<C: CryptoSession, T: Transport, S: MessageStore> {
     seen_message_ids: Mutex<HashSet<MessageId>>,
     /// Queue of pending acks that failed to send and need retry.
     pending_acks: Mutex<Vec<(MessageId, PeerId)>>,
+    /// Chat subsystem configuration (payload limits, dedup tracking, clock skew).
+    chat_config: ChatConfig,
 }
 
 impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
-    /// Creates a new `ChatManager` without history persistence.
+    /// Creates a new `ChatManager` without history persistence, using default
+    /// chat configuration.
     ///
     /// Returns the manager and a receiver for [`ChatEvent`]s that the
     /// UI layer should consume.
@@ -171,6 +166,29 @@ impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
         sender_id: SenderId,
         peer_id: PeerId,
         event_buffer: usize,
+    ) -> (Self, mpsc::Receiver<ChatEvent>) {
+        Self::new_with_config(
+            crypto,
+            transport,
+            sender_id,
+            peer_id,
+            event_buffer,
+            ChatConfig::default(),
+        )
+    }
+
+    /// Creates a new `ChatManager` without history persistence, using the
+    /// given chat configuration.
+    ///
+    /// Returns the manager and a receiver for [`ChatEvent`]s that the
+    /// UI layer should consume.
+    pub fn new_with_config(
+        crypto: C,
+        transport: T,
+        sender_id: SenderId,
+        peer_id: PeerId,
+        event_buffer: usize,
+        chat_config: ChatConfig,
     ) -> (Self, mpsc::Receiver<ChatEvent>) {
         let (event_tx, event_rx) = mpsc::channel(event_buffer);
         let manager = Self {
@@ -183,6 +201,7 @@ impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
             history: None,
             seen_message_ids: Mutex::new(HashSet::new()),
             pending_acks: Mutex::new(Vec::new()),
+            chat_config,
         };
         (manager, event_rx)
     }
@@ -220,6 +239,7 @@ impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
             history: Some(writer),
             seen_message_ids: Mutex::new(HashSet::new()),
             pending_acks: Mutex::new(Vec::new()),
+            chat_config: ChatConfig::default(),
         };
         (manager, event_rx, warning_rx)
     }
@@ -397,7 +417,7 @@ impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
     pub async fn receive_one(&self) -> Result<Envelope, SendError> {
         // Extension 1a: Check payload size before decryption
         let (from, encrypted) = self.transport.recv().await?;
-        if encrypted.len() > MAX_ENCRYPTED_PAYLOAD_SIZE {
+        if encrypted.len() > self.chat_config.max_payload_size {
             tracing::warn!(
                 peer = %from,
                 size = encrypted.len(),
@@ -405,7 +425,7 @@ impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
             );
             return Err(SendError::OversizedPayload {
                 size: encrypted.len(),
-                max: MAX_ENCRYPTED_PAYLOAD_SIZE,
+                max: self.chat_config.max_payload_size,
             });
         }
 
@@ -439,7 +459,7 @@ impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
                         return Ok(envelope);
                     }
                     // Track this message ID
-                    if seen.len() >= MAX_DUPLICATE_TRACKING {
+                    if seen.len() >= self.chat_config.max_duplicate_tracking {
                         // Simple eviction: clear half the set
                         seen.clear();
                     }
@@ -596,7 +616,7 @@ impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
         } else {
             now.as_millis() - timestamp.as_millis()
         };
-        diff > CLOCK_SKEW_TOLERANCE_MS
+        diff > self.chat_config.clock_skew_tolerance_ms
     }
 
     /// Get the current status of a sent message.

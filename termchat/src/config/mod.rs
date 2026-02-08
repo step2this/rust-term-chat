@@ -299,6 +299,8 @@ impl ClientConfig {
             relay_url,
             local_peer_id,
             remote_peer_id,
+            channel_capacity: self.channel_capacity,
+            chat_event_buffer: self.chat_event_buffer,
         })
     }
 }
@@ -531,6 +533,8 @@ peer_id = "file-peer"
         assert_eq!(net.relay_url, "ws://localhost:9000/ws");
         assert_eq!(net.local_peer_id, "alice");
         assert_eq!(net.remote_peer_id, "bob");
+        assert_eq!(net.channel_capacity, 256);
+        assert_eq!(net.chat_event_buffer, 64);
     }
 
     #[test]

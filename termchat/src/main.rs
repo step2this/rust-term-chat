@@ -18,7 +18,6 @@
 
 use std::io;
 use std::path::Path;
-use std::time::Duration;
 
 use clap::Parser;
 use crossterm::{
@@ -34,9 +33,6 @@ use termchat::app::{App, DisplayMessage, MessageStatus, PanelFocus};
 use termchat::config::{CliArgs, ClientConfig};
 use termchat::net::{self, NetCommand, NetConfig, NetEvent};
 use termchat::ui;
-
-/// Poll timeout for the event loop (50ms = ~20 FPS).
-const POLL_TIMEOUT: Duration = Duration::from_millis(50);
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -67,7 +63,7 @@ async fn main() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Run the app.
-    let result = run_app(&mut terminal, net_config).await;
+    let result = run_app(&mut terminal, net_config, &config).await;
 
     // Restore terminal.
     disable_raw_mode()?;
@@ -109,8 +105,11 @@ fn init_logging(level: &str, file_path: Option<&Path>) -> Option<WorkerGuard> {
 async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     net_config: Option<NetConfig>,
+    client_config: &ClientConfig,
 ) -> io::Result<()> {
-    let mut app = App::new();
+    let mut app = App::new()
+        .with_typing_timeout(client_config.typing_timeout_secs)
+        .with_max_task_title_len(client_config.max_task_title_len);
 
     // Attempt to connect to the relay if config is provided.
     let (cmd_tx, mut evt_rx) = match net_config {
@@ -141,8 +140,8 @@ async fn run_app(
         // Step 3: Tick typing timer.
         app.tick_typing();
 
-        // Step 4: Poll for terminal input events (50ms timeout).
-        if event::poll(POLL_TIMEOUT)?
+        // Step 4: Poll for terminal input events.
+        if event::poll(client_config.poll_timeout)?
             && let Event::Key(key) = event::read()?
         {
             if key.kind != KeyEventKind::Press {

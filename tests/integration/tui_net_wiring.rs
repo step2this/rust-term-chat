@@ -25,11 +25,7 @@ async fn start_relay() -> (String, tokio::task::JoinHandle<()>) {
 
 /// Helper: create a `NetConfig` for a given relay URL and peer IDs.
 fn make_config(relay_url: &str, local: &str, remote: &str) -> NetConfig {
-    NetConfig {
-        relay_url: relay_url.to_string(),
-        local_peer_id: local.to_string(),
-        remote_peer_id: remote.to_string(),
-    }
+    NetConfig::new(relay_url.to_string(), local.to_string(), remote.to_string())
 }
 
 // =============================================================================

@@ -70,7 +70,7 @@ pub enum NetEvent {
     Error(String),
 }
 
-/// Configuration for the networking layer, parsed from environment variables.
+/// Configuration for the networking layer.
 #[derive(Debug, Clone)]
 pub struct NetConfig {
     /// WebSocket URL of the relay server (e.g., `ws://127.0.0.1:9000/ws`).
@@ -79,13 +79,31 @@ pub struct NetConfig {
     pub local_peer_id: String,
     /// Remote peer identity string (who we're chatting with).
     pub remote_peer_id: String,
+    /// Channel capacity for command/event mpsc channels.
+    pub channel_capacity: usize,
+    /// Buffer size for the `ChatManager` event channel.
+    pub chat_event_buffer: usize,
 }
 
-/// Channel capacity for commands and events.
-const CHANNEL_CAPACITY: usize = 256;
+/// Default channel capacity for commands and events.
+const DEFAULT_CHANNEL_CAPACITY: usize = 256;
 
-/// Channel capacity for `ChatManager` internal events.
-const CHAT_EVENT_BUFFER: usize = 64;
+/// Default channel capacity for `ChatManager` internal events.
+const DEFAULT_CHAT_EVENT_BUFFER: usize = 64;
+
+impl NetConfig {
+    /// Creates a `NetConfig` with default channel capacities.
+    #[must_use]
+    pub const fn new(relay_url: String, local_peer_id: String, remote_peer_id: String) -> Self {
+        Self {
+            relay_url,
+            local_peer_id,
+            remote_peer_id,
+            channel_capacity: DEFAULT_CHANNEL_CAPACITY,
+            chat_event_buffer: DEFAULT_CHAT_EVENT_BUFFER,
+        }
+    }
+}
 
 /// Spawn the networking background tasks and return channel handles.
 ///
@@ -121,14 +139,14 @@ pub async fn spawn_net(
             transport,
             sender_id,
             remote_peer.clone(),
-            CHAT_EVENT_BUFFER,
+            config.chat_event_buffer,
         );
 
     let chat_mgr = Arc::new(chat_mgr);
 
     // Create the command/event channels for TUI communication.
-    let (cmd_tx, cmd_rx) = mpsc::channel::<NetCommand>(CHANNEL_CAPACITY);
-    let (evt_tx, evt_rx) = mpsc::channel::<NetEvent>(CHANNEL_CAPACITY);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<NetCommand>(config.channel_capacity);
+    let (evt_tx, evt_rx) = mpsc::channel::<NetEvent>(config.channel_capacity);
 
     // Send initial connection status.
     let _ = evt_tx
@@ -280,14 +298,16 @@ mod tests {
 
     #[test]
     fn net_config_fields_accessible() {
-        let config = NetConfig {
-            relay_url: "ws://localhost:9000/ws".to_string(),
-            local_peer_id: "alice".to_string(),
-            remote_peer_id: "bob".to_string(),
-        };
+        let config = NetConfig::new(
+            "ws://localhost:9000/ws".to_string(),
+            "alice".to_string(),
+            "bob".to_string(),
+        );
         assert_eq!(config.relay_url, "ws://localhost:9000/ws");
         assert_eq!(config.local_peer_id, "alice");
         assert_eq!(config.remote_peer_id, "bob");
+        assert_eq!(config.channel_capacity, 256);
+        assert_eq!(config.chat_event_buffer, 64);
     }
 
     #[test]
