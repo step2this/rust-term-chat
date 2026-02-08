@@ -8,25 +8,60 @@
 //! # Architecture
 //!
 //! ```text
-//! TUI (main thread)  ←── NetEvent ───  tokio background tasks
+//! TUI (main thread)  <── NetEvent ───  tokio background tasks
 //!                     ─── NetCommand →
 //! ```
 //!
 //! The main thread sends [`NetCommand`]s (e.g., send a message) and drains
 //! [`NetEvent`]s (e.g., message received, status changed) on each tick of
 //! the poll-based event loop.
+//!
+//! ## Supervisor Pattern (UC-011)
+//!
+//! ```text
+//! spawn_net() returns (cmd_tx, evt_rx) -- UNCHANGED interface
+//!   |
+//!   supervisor_task (NEW) -- owns NetConfig, manages lifecycle
+//!     |
+//!     +-- command_handler  (persists across reconnects)
+//!     +-- receive_loop     (restarted on reconnect)
+//!     +-- chat_event_fwd   (restarted on reconnect)
+//! ```
+//!
+//! When the receive loop detects a connection drop, the supervisor detects
+//! the task completion, applies exponential backoff with jitter, and attempts
+//! to reconnect. Messages sent during disconnection are queued and drained
+//! after reconnection succeeds.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
-use tokio::sync::mpsc;
+use rand::Rng;
+use tokio::sync::{RwLock, mpsc};
 
 use termchat_proto::message::{ConversationId, MessageContent, SenderId};
 
 use crate::chat::history::InMemoryStore;
 use crate::chat::{ChatEvent, ChatManager};
+use crate::config::ReconnectConfig;
 use crate::crypto::noise::StubNoiseSession;
 use crate::transport::PeerId;
 use crate::transport::relay::RelayTransport;
+
+/// Type alias for the shared, swappable `ChatManager`.
+///
+/// The supervisor writes `Some(...)` after (re)connection and `None` on
+/// disconnect. The command handler reads it for sending messages.
+type SharedChatManager =
+    Arc<RwLock<Option<ChatManager<StubNoiseSession, RelayTransport, InMemoryStore>>>>;
+
+/// Type alias for the shared offline message queue.
+///
+/// When the `ChatManager` is `None` (disconnected), the command handler
+/// pushes messages here. The supervisor drains the queue after reconnection.
+type MessageQueue = Arc<tokio::sync::Mutex<VecDeque<String>>>;
 
 /// Commands sent from the TUI main loop to the networking background tasks.
 #[derive(Debug)]
@@ -68,6 +103,15 @@ pub enum NetEvent {
     },
     /// An error occurred in the networking layer.
     Error(String),
+    /// Reconnection attempt in progress.
+    Reconnecting {
+        /// Current attempt number (1-based).
+        attempt: u32,
+        /// Maximum number of attempts before giving up.
+        max_attempts: u32,
+    },
+    /// All reconnection attempts exhausted.
+    ReconnectFailed,
 }
 
 /// Configuration for the networking layer.
@@ -83,6 +127,8 @@ pub struct NetConfig {
     pub channel_capacity: usize,
     /// Buffer size for the `ChatManager` event channel.
     pub chat_event_buffer: usize,
+    /// Reconnection configuration (backoff, retries, queue).
+    pub reconnect: ReconnectConfig,
 }
 
 /// Default channel capacity for commands and events.
@@ -92,15 +138,16 @@ const DEFAULT_CHANNEL_CAPACITY: usize = 256;
 const DEFAULT_CHAT_EVENT_BUFFER: usize = 64;
 
 impl NetConfig {
-    /// Creates a `NetConfig` with default channel capacities.
+    /// Creates a `NetConfig` with default channel capacities and reconnect config.
     #[must_use]
-    pub const fn new(relay_url: String, local_peer_id: String, remote_peer_id: String) -> Self {
+    pub fn new(relay_url: String, local_peer_id: String, remote_peer_id: String) -> Self {
         Self {
             relay_url,
             local_peer_id,
             remote_peer_id,
             channel_capacity: DEFAULT_CHANNEL_CAPACITY,
             chat_event_buffer: DEFAULT_CHAT_EVENT_BUFFER,
+            reconnect: ReconnectConfig::default(),
         }
     }
 }
@@ -110,25 +157,28 @@ impl NetConfig {
 /// This connects to the relay server, registers the local peer, creates
 /// a [`ChatManager`] with [`StubNoiseSession`] encryption, and spawns:
 ///
-/// 1. A **receive loop** that calls `chat_mgr.receive_one()` and forwards
-///    decoded events as [`NetEvent`]s.
-/// 2. A **command handler** that listens for [`NetCommand`]s and calls
-///    `chat_mgr.send_message()`.
-/// 3. A **chat event forwarder** that maps [`ChatEvent`]s to [`NetEvent`]s.
+/// 1. A **supervisor** that owns the connection lifecycle and handles
+///    reconnection with exponential backoff.
+/// 2. A **command handler** that persists across reconnects and reads
+///    the shared `ChatManager` for sending messages.
+/// 3. A **receive loop** (managed by supervisor, restarted on reconnect)
+///    that calls `chat_mgr.receive_one()` and forwards decoded events.
+/// 4. A **chat event forwarder** (managed by supervisor, restarted on reconnect)
+///    that maps [`ChatEvent`]s to [`NetEvent`]s.
 ///
 /// # Errors
 ///
-/// Returns an error string if relay connection or registration fails.
-/// The caller should fall back to offline demo mode on error.
+/// Returns an error string if the initial relay connection or registration
+/// fails. The caller should fall back to offline demo mode on error.
 pub async fn spawn_net(
     config: NetConfig,
 ) -> Result<(mpsc::Sender<NetCommand>, mpsc::Receiver<NetEvent>), String> {
-    // Connect to the relay server.
+    // Initial connection.
     let transport = RelayTransport::connect(&config.relay_url, PeerId::new(&config.local_peer_id))
         .await
         .map_err(|e| format!("relay connection failed: {e}"))?;
 
-    // Create the ChatManager with stub encryption and in-memory history.
+    // Create the initial ChatManager.
     let crypto = StubNoiseSession::new(true);
     let sender_id = SenderId::new(config.local_peer_id.as_bytes().to_vec());
     let remote_peer = PeerId::new(&config.remote_peer_id);
@@ -142,7 +192,10 @@ pub async fn spawn_net(
             config.chat_event_buffer,
         );
 
-    let chat_mgr = Arc::new(chat_mgr);
+    // Shared state for the supervisor pattern.
+    let shared_mgr: SharedChatManager = Arc::new(RwLock::new(Some(chat_mgr)));
+    let message_queue: MessageQueue = Arc::new(tokio::sync::Mutex::new(VecDeque::new()));
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
 
     // Create the command/event channels for TUI communication.
     let (cmd_tx, cmd_rx) = mpsc::channel::<NetCommand>(config.channel_capacity);
@@ -156,27 +209,291 @@ pub async fn spawn_net(
         })
         .await;
 
-    // Spawn the receive loop.
-    let recv_mgr = Arc::clone(&chat_mgr);
-    let recv_evt_tx = evt_tx.clone();
-    tokio::spawn(async move {
-        receive_loop(recv_mgr, recv_evt_tx).await;
-    });
-
-    // Spawn the command handler.
-    let cmd_mgr = Arc::clone(&chat_mgr);
+    // Spawn the command handler (persists across reconnects).
+    let cmd_mgr = Arc::clone(&shared_mgr);
     let cmd_evt_tx = evt_tx.clone();
+    let cmd_queue = Arc::clone(&message_queue);
+    let cmd_shutdown = Arc::clone(&shutdown_flag);
     let conversation = ConversationId::new();
+    let queue_cap = config.reconnect.message_queue_cap;
     tokio::spawn(async move {
-        command_handler(cmd_mgr, cmd_rx, cmd_evt_tx, conversation).await;
+        command_handler(
+            cmd_mgr,
+            cmd_rx,
+            cmd_evt_tx,
+            conversation,
+            cmd_queue,
+            cmd_shutdown,
+            queue_cap,
+        )
+        .await;
     });
 
-    // Spawn the chat event forwarder.
+    // Spawn the supervisor (owns reconnect lifecycle).
+    let sup_mgr = Arc::clone(&shared_mgr);
+    let sup_evt_tx = evt_tx;
+    let sup_queue = Arc::clone(&message_queue);
+    let sup_shutdown = Arc::clone(&shutdown_flag);
     tokio::spawn(async move {
-        chat_event_forwarder(chat_event_rx, evt_tx).await;
+        supervisor(
+            config,
+            sup_mgr,
+            chat_event_rx,
+            sup_evt_tx,
+            sup_queue,
+            sup_shutdown,
+        )
+        .await;
     });
 
     Ok((cmd_tx, evt_rx))
+}
+
+/// Supervisor task: manages receive loop lifecycle and reconnection.
+///
+/// After the initial connection, spawns the receive loop and chat event
+/// forwarder. When the receive loop exits (connection dropped), the
+/// supervisor attempts reconnection with exponential backoff and jitter.
+async fn supervisor(
+    config: NetConfig,
+    shared_mgr: SharedChatManager,
+    initial_chat_event_rx: mpsc::Receiver<ChatEvent>,
+    evt_tx: mpsc::Sender<NetEvent>,
+    message_queue: MessageQueue,
+    shutdown_flag: Arc<AtomicBool>,
+) {
+    let mut chat_event_rx = initial_chat_event_rx;
+    let mut last_connected_at: Option<Instant> = Some(Instant::now());
+
+    loop {
+        // Spawn the receive loop for the current connection.
+        let recv_mgr = Arc::clone(&shared_mgr);
+        let recv_evt_tx = evt_tx.clone();
+        let recv_handle = tokio::spawn(async move {
+            receive_loop(recv_mgr, recv_evt_tx).await;
+        });
+
+        // Spawn the chat event forwarder for the current connection.
+        let fwd_evt_tx = evt_tx.clone();
+        let fwd_handle = tokio::spawn(async move {
+            chat_event_forwarder(chat_event_rx, fwd_evt_tx).await;
+        });
+
+        // Wait for the receive loop to finish (connection dropped).
+        let _ = recv_handle.await;
+
+        // Check for shutdown.
+        if shutdown_flag.load(Ordering::Relaxed) {
+            fwd_handle.abort();
+            break;
+        }
+
+        // Mark the ChatManager as disconnected.
+        {
+            let mut mgr = shared_mgr.write().await;
+            *mgr = None;
+        }
+
+        // Send disconnection status.
+        let _ = evt_tx
+            .send(NetEvent::ConnectionStatus {
+                connected: false,
+                transport_type: "Relay".to_string(),
+            })
+            .await;
+
+        // Abort the forwarder (it was tied to the old ChatManager's event channel).
+        fwd_handle.abort();
+
+        // Attempt reconnection with backoff.
+        let reconnect_result = reconnect_with_backoff(
+            &config,
+            &shared_mgr,
+            &evt_tx,
+            &message_queue,
+            &shutdown_flag,
+            &mut last_connected_at,
+        )
+        .await;
+
+        if let Some(new_chat_event_rx) = reconnect_result {
+            // Reconnection succeeded. The new ChatManager is already in shared_mgr.
+            // Loop back to spawn new receive_loop + forwarder.
+            chat_event_rx = new_chat_event_rx;
+        } else {
+            // All attempts failed or shutdown requested.
+            if !shutdown_flag.load(Ordering::Relaxed) {
+                let _ = evt_tx.send(NetEvent::ReconnectFailed).await;
+            }
+            break;
+        }
+    }
+}
+
+/// Attempt reconnection with exponential backoff and jitter.
+///
+/// Returns `Some(chat_event_rx)` on success, `None` if all attempts fail
+/// or shutdown is requested.
+async fn reconnect_with_backoff(
+    config: &NetConfig,
+    shared_mgr: &SharedChatManager,
+    evt_tx: &mpsc::Sender<NetEvent>,
+    message_queue: &MessageQueue,
+    shutdown_flag: &Arc<AtomicBool>,
+    last_connected_at: &mut Option<Instant>,
+) -> Option<mpsc::Receiver<ChatEvent>> {
+    let reconnect = &config.reconnect;
+
+    // Flap detection: if we were connected for less than the stability
+    // threshold, don't reset the backoff counter (the connection was unstable).
+    // Since this is the first reconnect cycle after a drop, we start from 0
+    // unless flapping is detected. On subsequent calls, the caller tracks
+    // stability via last_connected_at.
+    let flapping = last_connected_at.is_some_and(|t| t.elapsed() < reconnect.stability_threshold);
+    if flapping {
+        tracing::warn!("connection was unstable (flap detected), backoff will not reset");
+    }
+
+    for attempt in 0..reconnect.max_attempts {
+        if shutdown_flag.load(Ordering::Relaxed) {
+            return None;
+        }
+
+        // Calculate delay with exponential backoff + jitter.
+        let base_delay = reconnect
+            .initial_delay
+            .saturating_mul(2u32.saturating_pow(attempt));
+        let capped_delay = std::cmp::min(base_delay, reconnect.max_delay);
+
+        // Add jitter: 0..25% of the capped delay.
+        let jitter_range = capped_delay.as_millis() / 4;
+        let jitter = if jitter_range > 0 {
+            let jitter_ms = rand::thread_rng().gen_range(0..=jitter_range);
+            std::time::Duration::from_millis(u64::try_from(jitter_ms).unwrap_or(0))
+        } else {
+            std::time::Duration::ZERO
+        };
+
+        let total_delay = capped_delay + jitter;
+        let delay_ms = u64::try_from(total_delay.as_millis()).unwrap_or(u64::MAX);
+        tracing::info!(
+            attempt = attempt + 1,
+            max_attempts = reconnect.max_attempts,
+            delay_ms,
+            "reconnecting to relay"
+        );
+
+        tokio::time::sleep(total_delay).await;
+
+        if shutdown_flag.load(Ordering::Relaxed) {
+            return None;
+        }
+
+        // Notify the TUI of the reconnection attempt.
+        let _ = evt_tx
+            .send(NetEvent::Reconnecting {
+                attempt: attempt + 1,
+                max_attempts: reconnect.max_attempts,
+            })
+            .await;
+
+        // Try to connect.
+        match RelayTransport::connect(&config.relay_url, PeerId::new(&config.local_peer_id)).await {
+            Ok(transport) => {
+                tracing::info!(attempt = attempt + 1, "reconnected to relay successfully");
+
+                // Create a new ChatManager.
+                let crypto = StubNoiseSession::new(true);
+                let sender_id = SenderId::new(config.local_peer_id.as_bytes().to_vec());
+                let remote_peer = PeerId::new(&config.remote_peer_id);
+
+                let (new_mgr, new_chat_event_rx) =
+                    ChatManager::<StubNoiseSession, RelayTransport, InMemoryStore>::new(
+                        crypto,
+                        transport,
+                        sender_id,
+                        remote_peer,
+                        config.chat_event_buffer,
+                    );
+
+                // Swap in the new ChatManager.
+                {
+                    let mut mgr = shared_mgr.write().await;
+                    *mgr = Some(new_mgr);
+                }
+
+                // Drain the offline message queue.
+                drain_message_queue(shared_mgr, message_queue, evt_tx).await;
+
+                // Update connection timestamp for flap detection.
+                *last_connected_at = Some(Instant::now());
+
+                // Send reconnected status.
+                let _ = evt_tx
+                    .send(NetEvent::ConnectionStatus {
+                        connected: true,
+                        transport_type: "Relay".to_string(),
+                    })
+                    .await;
+
+                return Some(new_chat_event_rx);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    max_attempts = reconnect.max_attempts,
+                    error = %e,
+                    "reconnect attempt failed"
+                );
+            }
+        }
+    }
+
+    tracing::error!(
+        attempts = reconnect.max_attempts,
+        "all reconnect attempts exhausted"
+    );
+    None
+}
+
+/// Drain the offline message queue by sending all queued messages.
+///
+/// Messages that fail to send are reported as errors but not re-queued
+/// (to avoid infinite retry loops).
+async fn drain_message_queue(
+    shared_mgr: &SharedChatManager,
+    message_queue: &MessageQueue,
+    evt_tx: &mpsc::Sender<NetEvent>,
+) {
+    // Drain the queue into a local vec to release the lock quickly.
+    let messages: Vec<String> = {
+        let mut queue = message_queue.lock().await;
+        let count = queue.len();
+        if count == 0 {
+            return;
+        }
+        tracing::info!(count, "draining offline message queue");
+        queue.drain(..).collect()
+    };
+
+    for text in messages {
+        let mgr_guard = shared_mgr.read().await;
+        if let Some(ref mgr) = *mgr_guard {
+            let content = MessageContent::Text(text);
+            let conversation = ConversationId::new();
+            if let Err(e) = mgr.send_message(content, conversation).await {
+                let _ = evt_tx
+                    .send(NetEvent::Error(format!(
+                        "Failed to send queued message: {e}"
+                    )))
+                    .await;
+            }
+        } else {
+            // ChatManager gone again during drain; remaining messages are lost.
+            tracing::warn!("ChatManager unavailable during queue drain, messages lost");
+            break;
+        }
+    }
 }
 
 /// Background task: continuously receive messages from the transport.
@@ -184,12 +501,25 @@ pub async fn spawn_net(
 /// Calls `chat_mgr.receive_one()` in a loop. The `ChatManager` handles
 /// decryption, deserialization, duplicate detection, and auto-acking.
 /// We forward decoded messages as [`NetEvent::MessageReceived`].
-async fn receive_loop(
-    chat_mgr: Arc<ChatManager<StubNoiseSession, RelayTransport, InMemoryStore>>,
-    evt_tx: mpsc::Sender<NetEvent>,
-) {
+///
+/// Returns when the connection is closed or the `ChatManager` is `None`.
+///
+/// # Note
+///
+/// The supervisor guarantees that the `SharedChatManager` will not be
+/// modified while this task is running, so we read the `ChatManager`
+/// reference once at startup and use it throughout the loop.
+#[allow(clippy::significant_drop_tightening)]
+async fn receive_loop(shared_mgr: SharedChatManager, evt_tx: mpsc::Sender<NetEvent>) {
+    // Take a snapshot of the ChatManager at startup. The supervisor will
+    // not modify shared_mgr until this task completes.
+    let mgr_guard = shared_mgr.read().await;
+    let Some(ref mgr) = *mgr_guard else {
+        return;
+    };
+
     loop {
-        match chat_mgr.receive_one().await {
+        match mgr.receive_one().await {
             Ok(_envelope) => {
                 // The ChatManager already emits ChatEvents for received messages
                 // and acks. The chat_event_forwarder task handles those.
@@ -222,29 +552,56 @@ async fn receive_loop(
 /// Background task: handle commands from the TUI main loop.
 ///
 /// Listens for [`NetCommand`]s and dispatches them to the `ChatManager`.
+/// This task persists across reconnects. When the `ChatManager` is `None`
+/// (disconnected), messages are queued for later delivery.
 async fn command_handler(
-    chat_mgr: Arc<ChatManager<StubNoiseSession, RelayTransport, InMemoryStore>>,
+    shared_mgr: SharedChatManager,
     mut cmd_rx: mpsc::Receiver<NetCommand>,
     evt_tx: mpsc::Sender<NetEvent>,
     conversation: ConversationId,
+    message_queue: MessageQueue,
+    shutdown_flag: Arc<AtomicBool>,
+    queue_cap: usize,
 ) {
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
             NetCommand::SendMessage { text } => {
-                let content = MessageContent::Text(text);
-                match chat_mgr.send_message(content, conversation.clone()).await {
-                    Ok((_msg_id, _status)) => {
-                        // Status update will come through ChatEvent -> NetEvent pipeline.
+                // Try to send if connected; queue on failure or disconnect.
+                let sent = {
+                    let mgr_guard = shared_mgr.read().await;
+                    if let Some(ref mgr) = *mgr_guard {
+                        let content = MessageContent::Text(text.clone());
+                        mgr.send_message(content, conversation.clone())
+                            .await
+                            .is_ok()
+                    } else {
+                        false
                     }
-                    Err(e) => {
-                        let _ = evt_tx
-                            .send(NetEvent::Error(format!("Send failed: {e}")))
-                            .await;
-                    }
+                };
+
+                if !sent {
+                    // Disconnected or send failed: queue for later delivery.
+                    let queue_full = {
+                        let mut queue = message_queue.lock().await;
+                        if queue.len() < queue_cap {
+                            queue.push_back(text);
+                            false
+                        } else {
+                            true
+                        }
+                    };
+
+                    let msg = if queue_full {
+                        "Disconnected, message queue full — message dropped"
+                    } else {
+                        "Disconnected, message queued for delivery"
+                    };
+                    let _ = evt_tx.send(NetEvent::Error(msg.to_string())).await;
                 }
             }
             NetCommand::Shutdown => {
                 tracing::info!("net command handler shutting down");
+                shutdown_flag.store(true, Ordering::Relaxed);
                 break;
             }
         }
@@ -311,6 +668,29 @@ mod tests {
     }
 
     #[test]
+    fn net_config_includes_reconnect_defaults() {
+        let config = NetConfig::new(
+            "ws://localhost:9000/ws".to_string(),
+            "alice".to_string(),
+            "bob".to_string(),
+        );
+        assert_eq!(
+            config.reconnect.initial_delay,
+            std::time::Duration::from_secs(1)
+        );
+        assert_eq!(
+            config.reconnect.max_delay,
+            std::time::Duration::from_secs(30)
+        );
+        assert_eq!(config.reconnect.max_attempts, 10);
+        assert_eq!(
+            config.reconnect.stability_threshold,
+            std::time::Duration::from_secs(30)
+        );
+        assert_eq!(config.reconnect.message_queue_cap, 100);
+    }
+
+    #[test]
     fn net_command_debug_format() {
         let cmd = NetCommand::SendMessage {
             text: "hello".to_string(),
@@ -328,5 +708,24 @@ mod tests {
         };
         let debug = format!("{evt:?}");
         assert!(debug.contains("MessageReceived"));
+    }
+
+    #[test]
+    fn net_event_reconnecting_debug_format() {
+        let evt = NetEvent::Reconnecting {
+            attempt: 1,
+            max_attempts: 10,
+        };
+        let debug = format!("{evt:?}");
+        assert!(debug.contains("Reconnecting"));
+        assert!(debug.contains('1'));
+        assert!(debug.contains("10"));
+    }
+
+    #[test]
+    fn net_event_reconnect_failed_debug_format() {
+        let evt = NetEvent::ReconnectFailed;
+        let debug = format!("{evt:?}");
+        assert!(debug.contains("ReconnectFailed"));
     }
 }

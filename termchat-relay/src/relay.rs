@@ -88,6 +88,19 @@ impl RelayState {
         let conns = self.connections.read().await;
         conns.get(peer_id).cloned()
     }
+
+    /// Send a WebSocket Close frame to all connected peers.
+    ///
+    /// This causes each peer's writer task to send a close frame, which
+    /// triggers the client-side reader to detect disconnection. Useful for
+    /// graceful shutdown and testing.
+    pub async fn close_all_connections(&self) {
+        let conns = self.connections.read().await;
+        for (peer_id, sender) in conns.iter() {
+            tracing::info!(peer_id = %peer_id, "sending close frame to peer");
+            let _ = sender.send(Message::Close(None));
+        }
+    }
 }
 
 /// Handles an upgraded WebSocket connection for a single peer.
