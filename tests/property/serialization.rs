@@ -9,6 +9,9 @@
 use proptest::prelude::*;
 use termchat_proto::codec;
 use termchat_proto::message::*;
+use termchat_proto::task::{
+    self, LwwRegister, Task, TaskFieldUpdate, TaskId, TaskStatus, TaskSyncMessage,
+};
 use uuid::Uuid;
 
 // --- Arbitrary implementations for protocol types ---
@@ -161,5 +164,120 @@ proptest! {
             postcard::from_bytes(&bytes)
                 .expect("decode should succeed");
         prop_assert_eq!(status, decoded);
+    }
+}
+
+// ==========================================================================
+// Task sync protocol property tests (UC-008)
+// ==========================================================================
+
+/// Strategy for generating arbitrary `TaskId` values.
+fn arb_task_id() -> impl Strategy<Value = TaskId> {
+    any::<u128>().prop_map(|n| TaskId::from_uuid(Uuid::from_u128(n)))
+}
+
+/// Strategy for generating arbitrary `TaskStatus` values.
+fn arb_task_status() -> impl Strategy<Value = TaskStatus> {
+    prop_oneof![
+        Just(TaskStatus::Open),
+        Just(TaskStatus::InProgress),
+        Just(TaskStatus::Completed),
+        Just(TaskStatus::Deleted),
+    ]
+}
+
+/// Strategy for generating arbitrary LWW registers with string values.
+fn arb_lww_string() -> impl Strategy<Value = LwwRegister<String>> {
+    ("[^\x00]{0,128}", any::<u64>(), "[a-z]{1,16}")
+        .prop_map(|(value, timestamp, author)| LwwRegister::new(value, timestamp, author))
+}
+
+/// Strategy for generating arbitrary LWW registers with `TaskStatus` values.
+fn arb_lww_status() -> impl Strategy<Value = LwwRegister<TaskStatus>> {
+    (arb_task_status(), any::<u64>(), "[a-z]{1,16}")
+        .prop_map(|(value, timestamp, author)| LwwRegister::new(value, timestamp, author))
+}
+
+/// Strategy for generating arbitrary LWW registers with optional string values.
+fn arb_lww_assignee() -> impl Strategy<Value = LwwRegister<Option<String>>> {
+    (
+        prop::option::of("[a-z]{1,16}".prop_map(String::from)),
+        any::<u64>(),
+        "[a-z]{1,16}",
+    )
+        .prop_map(|(value, timestamp, author)| LwwRegister::new(value, timestamp, author))
+}
+
+/// Strategy for generating arbitrary `Task` values.
+fn arb_task() -> impl Strategy<Value = Task> {
+    (
+        arb_task_id(),
+        "[a-z]{1,32}",
+        arb_lww_string(),
+        arb_lww_status(),
+        arb_lww_assignee(),
+        any::<u64>(),
+        "[a-z]{1,16}",
+    )
+        .prop_map(
+            |(id, room_id, title, status, assignee, created_at, created_by)| Task {
+                id,
+                room_id,
+                title,
+                status,
+                assignee,
+                created_at,
+                created_by,
+            },
+        )
+}
+
+/// Strategy for generating arbitrary `TaskFieldUpdate` values.
+fn arb_task_field_update() -> impl Strategy<Value = TaskFieldUpdate> {
+    prop_oneof![
+        arb_lww_string().prop_map(TaskFieldUpdate::Title),
+        arb_lww_status().prop_map(TaskFieldUpdate::Status),
+        arb_lww_assignee().prop_map(TaskFieldUpdate::Assignee),
+    ]
+}
+
+/// Strategy for generating arbitrary `TaskSyncMessage` values.
+fn arb_task_sync_message() -> impl Strategy<Value = TaskSyncMessage> {
+    prop_oneof![
+        (arb_task_id(), "[a-z]{1,32}", arb_task_field_update()).prop_map(
+            |(task_id, room_id, field)| TaskSyncMessage::FieldUpdate {
+                task_id,
+                room_id,
+                field,
+            }
+        ),
+        ("[a-z]{1,32}", prop::collection::vec(arb_task(), 0..8))
+            .prop_map(|(room_id, tasks)| TaskSyncMessage::FullState { room_id, tasks }),
+        "[a-z]{1,32}".prop_map(|room_id| TaskSyncMessage::RequestFullState { room_id }),
+    ]
+}
+
+proptest! {
+    /// Any valid `Task` survives a postcard encode -> decode round-trip.
+    #[test]
+    fn task_postcard_round_trip(task in arb_task()) {
+        let bytes = postcard::to_allocvec(&task).expect("encode should succeed");
+        let decoded: Task = postcard::from_bytes(&bytes).expect("decode should succeed");
+        prop_assert_eq!(task, decoded);
+    }
+
+    /// Any valid `TaskSyncMessage` survives encode -> decode round-trip
+    /// through the task module's encode/decode functions.
+    #[test]
+    fn task_sync_message_round_trip(msg in arb_task_sync_message()) {
+        let bytes = task::encode(&msg).expect("encode should succeed");
+        let decoded = task::decode(&bytes).expect("decode should succeed");
+        prop_assert_eq!(msg, decoded);
+    }
+
+    /// Random bytes never cause a panic when decoded as a `TaskSyncMessage`.
+    #[test]
+    fn random_bytes_task_decode_no_panic(bytes in prop::collection::vec(any::<u8>(), 0..512)) {
+        let _ = task::decode(&bytes);
     }
 }

@@ -16,6 +16,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         PanelFocus::Input => "Enter: send | Tab: switch panel | Esc: quit | ←→: move cursor",
         PanelFocus::Sidebar => "Tab: switch panel | ↑↓/jk: navigate | Esc: quit",
         PanelFocus::Chat => "Tab: switch panel | ↑↓/jk: scroll | Esc: quit",
+        PanelFocus::Tasks => {
+            "Tab: switch panel | ↑↓/jk: navigate | Enter: toggle status | Esc: quit"
+        }
     };
 
     let status_line = Line::from(vec![

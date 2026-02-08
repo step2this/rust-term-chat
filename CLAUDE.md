@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project State
 
-Active development. Three-crate workspace is initialized and building. Completed: UC-001 (Send), UC-002 (Receive), UC-005 (E2E Handshake), UC-003 (P2P Connection), UC-004 (Relay Fallback), UC-006 (Create Room), UC-007 (Agent Join), Phase 1 (Hello Ratatui TUI). 475 tests passing. Phase 5 (Rooms) complete. Phase 6 (Agent Integration) in progress. Code quality sprint done: migrated bincode→postcard, eliminated all production unwrap/expect, fixed clippy pedantic.
+Active development. Three-crate workspace is initialized and building. Completed: UC-001 (Send), UC-002 (Receive), UC-005 (E2E Handshake), UC-003 (P2P Connection), UC-004 (Relay Fallback), UC-006 (Create Room), UC-007 (Agent Join), UC-008 (Share Task List), Phase 1 (Hello Ratatui TUI). 621 tests passing. Phase 6 (Agent Integration) complete. Phase 7 (Task Coordination) complete. Code quality sprint done: migrated bincode→postcard, eliminated all production unwrap/expect, fixed clippy pedantic.
 
 ## Build & Development Commands
 
@@ -14,12 +14,13 @@ Active development. Three-crate workspace is initialized and building. Completed
 cargo build
 cargo run                                # launch TUI client
 cargo run --bin termchat-relay           # relay server (ws://0.0.0.0:9000)
-cargo test                               # all tests (475)
+cargo test                               # all tests (621)
 cargo test --test send_receive           # UC-001/UC-002 integration test
 cargo test --test e2e_encryption         # UC-005 integration test
 cargo test --test p2p_connection         # UC-003 integration test
 cargo test --test relay_fallback         # UC-004 integration test
 cargo test --test room_management        # UC-006 integration test
+cargo test --test task_sync              # UC-008 integration test
 cargo test --test agent_bridge           # UC-007 integration test
 cargo test -p termchat-relay             # relay server unit tests
 cargo test --lib                         # unit tests only
@@ -42,9 +43,13 @@ Four layers: TUI (ratatui + crossterm) -> Application (chat/task/agent managers)
 ```
 termchat/src/
   main.rs          # TUI event loop (ratatui + crossterm)
-  lib.rs           # Crate root: pub mod agent, app, chat, crypto, transport, ui
-  app.rs           # App state, key event handling, panel focus, /invite-agent command
+  lib.rs           # Crate root: pub mod agent, app, chat, crypto, tasks, transport, ui
+  app.rs           # App state, key event handling, panel focus, /task + /invite-agent commands
   ui/              # TUI rendering (sidebar, chat_panel, task_panel, status_bar, theme)
+  tasks/
+    mod.rs         # TaskError enum, re-exports for merge + TaskManager
+    merge.rs       # Pure CRDT merge: merge_lww, merge_task, merge_task_list, apply_field_update
+    manager.rs     # TaskManager: room-scoped CRUD, apply_remote, build_full_state
   agent/
     mod.rs         # AgentError enum (thiserror)
     protocol.rs    # AgentMessage, BridgeMessage, JSON line encode/decode, validate_agent_id
@@ -72,12 +77,13 @@ termchat-relay/src/
   store.rs         # MessageStore: per-peer FIFO queues (1000 cap, eviction)
 
 termchat-proto/src/
-  lib.rs           # Crate root
+  lib.rs           # Crate root (pub mod agent, codec, message, relay, room, task)
   message.rs       # Wire format types: ChatMessage, Envelope, DeliveryAck, Nack, etc.
   codec.rs         # Postcard encode/decode with length-prefix framing
   relay.rs         # RelayMessage enum: Register, Registered, RelayPayload, Queued, Error, Room
   agent.rs         # AgentInfo, AgentCapability proto types
   room.rs          # RoomMessage enum: RegisterRoom, UnregisterRoom, ListRooms, RoomList, JoinRequest, JoinApproved, JoinDenied, MembershipUpdate
+  task.rs          # TaskId, LwwRegister<T>, Task, TaskStatus, TaskFieldUpdate, TaskSyncMessage, encode/decode
 ```
 
 ### File Ownership (for agent teams)

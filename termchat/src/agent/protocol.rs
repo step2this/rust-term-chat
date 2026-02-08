@@ -37,6 +37,27 @@ pub enum AgentMessage {
         /// The message content to deliver.
         content: String,
     },
+    /// Agent wants to create a new task in the room.
+    CreateTask {
+        /// Title for the new task.
+        title: String,
+    },
+    /// Agent wants to update a task's status.
+    UpdateTaskStatus {
+        /// ID of the task to update.
+        task_id: String,
+        /// New status string (e.g. `"open"`, `"in_progress"`, `"completed"`).
+        status: String,
+    },
+    /// Agent wants to assign a task to a room member.
+    AssignTask {
+        /// ID of the task to assign.
+        task_id: String,
+        /// Peer ID or display name of the assignee.
+        assignee: String,
+    },
+    /// Agent requests the current task list for the room.
+    ListTasks,
     /// Agent is gracefully disconnecting.
     Goodbye,
     /// Response to a [`BridgeMessage::Ping`].
@@ -86,6 +107,27 @@ pub enum BridgeMessage {
         /// Whether the affected member is an AI agent.
         is_agent: bool,
     },
+    /// The current task list for a room, sent in response to [`AgentMessage::ListTasks`].
+    TaskList {
+        /// Room the tasks belong to.
+        room_id: String,
+        /// All tasks in the room.
+        tasks: Vec<BridgeTaskInfo>,
+    },
+    /// A single task was created or updated.
+    TaskUpdate {
+        /// Room the task belongs to.
+        room_id: String,
+        /// The created or updated task.
+        task: BridgeTaskInfo,
+    },
+    /// A task was deleted from the room.
+    TaskDeleted {
+        /// Room the task was in.
+        room_id: String,
+        /// ID of the deleted task.
+        task_id: String,
+    },
     /// An error from the bridge.
     Error {
         /// Machine-readable error code (e.g. `"invalid_agent_id"`, `"room_not_found"`).
@@ -125,6 +167,21 @@ pub struct BridgeHistoryEntry {
     pub content: String,
     /// ISO 8601 timestamp string.
     pub timestamp: String,
+}
+
+/// Task information sent to agents in task-related [`BridgeMessage`] payloads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BridgeTaskInfo {
+    /// Unique task identifier.
+    pub task_id: String,
+    /// Human-readable task title.
+    pub title: String,
+    /// Current status (e.g. `"open"`, `"in_progress"`, `"completed"`).
+    pub status: String,
+    /// Optional assignee (peer ID or display name).
+    pub assignee: Option<String>,
+    /// Peer ID of the task creator.
+    pub created_by: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -624,5 +681,144 @@ mod tests {
         let existing = vec!["peer-alice".to_string(), "peer-bob".to_string()];
         let id = make_unique_agent_peer_id("claude", &existing);
         assert_eq!(id, "agent:claude");
+    }
+
+    // --- Task-related message tests ---
+
+    #[test]
+    fn agent_create_task_round_trip() {
+        let msg = AgentMessage::CreateTask {
+            title: "Fix the login bug".to_string(),
+        };
+        let line = encode_line(&msg).expect("encode");
+        let decoded: AgentMessage = decode_line(&line).expect("decode");
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn agent_create_task_json_shape() {
+        let msg = AgentMessage::CreateTask {
+            title: "Do thing".to_string(),
+        };
+        let json = serde_json::to_value(&msg).expect("to_value");
+        assert_eq!(json["type"], "create_task");
+        assert_eq!(json["title"], "Do thing");
+    }
+
+    #[test]
+    fn agent_update_task_status_round_trip() {
+        let msg = AgentMessage::UpdateTaskStatus {
+            task_id: "task-42".to_string(),
+            status: "completed".to_string(),
+        };
+        let line = encode_line(&msg).expect("encode");
+        let decoded: AgentMessage = decode_line(&line).expect("decode");
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn agent_assign_task_round_trip() {
+        let msg = AgentMessage::AssignTask {
+            task_id: "task-7".to_string(),
+            assignee: "peer-alice".to_string(),
+        };
+        let line = encode_line(&msg).expect("encode");
+        let decoded: AgentMessage = decode_line(&line).expect("decode");
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn agent_list_tasks_round_trip() {
+        let msg = AgentMessage::ListTasks;
+        let line = encode_line(&msg).expect("encode");
+        let decoded: AgentMessage = decode_line(&line).expect("decode");
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn agent_list_tasks_json_shape() {
+        let json = serde_json::to_value(&AgentMessage::ListTasks).expect("to_value");
+        assert_eq!(json["type"], "list_tasks");
+    }
+
+    #[test]
+    fn bridge_task_list_round_trip() {
+        let msg = BridgeMessage::TaskList {
+            room_id: "room-1".to_string(),
+            tasks: vec![BridgeTaskInfo {
+                task_id: "t-1".to_string(),
+                title: "Fix bug".to_string(),
+                status: "open".to_string(),
+                assignee: Some("alice".to_string()),
+                created_by: "peer-bob".to_string(),
+            }],
+        };
+        let line = encode_line(&msg).expect("encode");
+        let decoded: BridgeMessage = decode_line(&line).expect("decode");
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn bridge_task_list_json_shape() {
+        let msg = BridgeMessage::TaskList {
+            room_id: "r1".to_string(),
+            tasks: vec![],
+        };
+        let json = serde_json::to_value(&msg).expect("to_value");
+        assert_eq!(json["type"], "task_list");
+        assert_eq!(json["room_id"], "r1");
+    }
+
+    #[test]
+    fn bridge_task_update_round_trip() {
+        let msg = BridgeMessage::TaskUpdate {
+            room_id: "room-abc".to_string(),
+            task: BridgeTaskInfo {
+                task_id: "t-2".to_string(),
+                title: "Write tests".to_string(),
+                status: "in_progress".to_string(),
+                assignee: None,
+                created_by: "agent:claude".to_string(),
+            },
+        };
+        let line = encode_line(&msg).expect("encode");
+        let decoded: BridgeMessage = decode_line(&line).expect("decode");
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn bridge_task_deleted_round_trip() {
+        let msg = BridgeMessage::TaskDeleted {
+            room_id: "room-1".to_string(),
+            task_id: "t-99".to_string(),
+        };
+        let line = encode_line(&msg).expect("encode");
+        let decoded: BridgeMessage = decode_line(&line).expect("decode");
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn bridge_task_deleted_json_shape() {
+        let msg = BridgeMessage::TaskDeleted {
+            room_id: "r1".to_string(),
+            task_id: "t-1".to_string(),
+        };
+        let json = serde_json::to_value(&msg).expect("to_value");
+        assert_eq!(json["type"], "task_deleted");
+        assert_eq!(json["task_id"], "t-1");
+    }
+
+    #[test]
+    fn bridge_task_info_round_trip() {
+        let info = BridgeTaskInfo {
+            task_id: "t-5".to_string(),
+            title: "Deploy to prod".to_string(),
+            status: "completed".to_string(),
+            assignee: Some("peer-charlie".to_string()),
+            created_by: "peer-alice".to_string(),
+        };
+        let json = serde_json::to_string(&info).expect("encode");
+        let decoded: BridgeTaskInfo = serde_json::from_str(&json).expect("decode");
+        assert_eq!(info, decoded);
     }
 }

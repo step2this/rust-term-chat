@@ -37,7 +37,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // Render each panel
     sidebar::render(frame, content_chunks[0], app);
     chat_panel::render(frame, content_chunks[1], app);
-    task_panel::render(frame, content_chunks[2]);
+    task_panel::render(frame, content_chunks[2], app);
 
     // Render status bar
     status_bar::render(frame, status_area, app);

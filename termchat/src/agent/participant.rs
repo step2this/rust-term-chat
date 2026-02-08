@@ -14,6 +14,9 @@ use super::protocol::BridgeMessage;
 /// Maximum message size in bytes (64 KB).
 const MAX_MESSAGE_SIZE: usize = 64 * 1024;
 
+/// Capability string for task management operations.
+const CAPABILITY_TASK_MANAGEMENT: &str = "task_management";
+
 /// An outbound message from the agent to be fan-out delivered to room members.
 ///
 /// Sent via the `outbound_tx` channel to the app layer, which handles
@@ -123,6 +126,8 @@ pub struct AgentParticipant {
     display_name: String,
     /// Whether the handshake has completed (Welcome sent).
     is_ready: bool,
+    /// Capabilities declared by the agent during Hello handshake.
+    capabilities: Vec<String>,
     /// Channel to send outbound messages to the app layer for fan-out.
     outbound_tx: mpsc::Sender<OutboundAgentMessage>,
     /// Channel to receive room events for forwarding to the agent.
@@ -149,9 +154,21 @@ impl AgentParticipant {
             peer_id: peer_id.to_string(),
             display_name: display_name.to_string(),
             is_ready: false,
+            capabilities: Vec::new(),
             outbound_tx,
             room_event_rx,
         }
+    }
+
+    /// Sets the agent's capabilities (from the Hello handshake).
+    pub fn set_capabilities(&mut self, capabilities: Vec<String>) {
+        self.capabilities = capabilities;
+    }
+
+    /// Returns whether the agent has a specific capability.
+    #[must_use]
+    pub fn has_capability(&self, capability: &str) -> bool {
+        self.capabilities.iter().any(|c| c == capability)
     }
 
     /// Marks the participant as ready (Welcome has been sent).
@@ -278,6 +295,38 @@ impl AgentParticipant {
                     message: "unexpected Hello after handshake".to_string(),
                 };
                 let _ = self.conn.write_message(&err_msg).await;
+                Ok(None)
+            }
+            AgentMessage::CreateTask { title } => {
+                self.handle_task_message_with_capability_check(|| format!("CreateTask: {title}"))
+                    .await
+            }
+            AgentMessage::UpdateTaskStatus { task_id, status } => {
+                self.handle_task_message_with_capability_check(|| {
+                    format!("UpdateTaskStatus: {task_id} -> {status}")
+                })
+                .await
+            }
+            AgentMessage::AssignTask { task_id, assignee } => {
+                self.handle_task_message_with_capability_check(|| {
+                    format!("AssignTask: {task_id} -> {assignee}")
+                })
+                .await
+            }
+            AgentMessage::ListTasks => {
+                if !self.has_capability(CAPABILITY_TASK_MANAGEMENT) {
+                    let err_msg = BridgeMessage::Error {
+                        code: "capability_required".to_string(),
+                        message: "TaskManagement capability required".to_string(),
+                    };
+                    let _ = self.conn.write_message(&err_msg).await;
+                    return Ok(None);
+                }
+                let response = BridgeMessage::TaskList {
+                    room_id: self.room_id.clone(),
+                    tasks: vec![],
+                };
+                let _ = self.conn.write_message(&response).await;
                 Ok(None)
             }
         }
@@ -428,6 +477,40 @@ impl AgentParticipant {
             is_agent,
         };
         self.conn.write_message(&msg).await
+    }
+
+    /// Checks the `TaskManagement` capability and sends a placeholder response.
+    ///
+    /// Returns a capability error to the agent if the capability is missing.
+    /// Otherwise sends a placeholder `TaskUpdate` and returns `Ok(None)` to
+    /// continue the event loop. Full `TaskManager` integration will replace
+    /// this placeholder.
+    async fn handle_task_message_with_capability_check(
+        &mut self,
+        _describe: impl FnOnce() -> String,
+    ) -> Result<Option<DisconnectReason>, AgentError> {
+        if !self.has_capability(CAPABILITY_TASK_MANAGEMENT) {
+            let err_msg = BridgeMessage::Error {
+                code: "capability_required".to_string(),
+                message: "TaskManagement capability required".to_string(),
+            };
+            let _ = self.conn.write_message(&err_msg).await;
+            return Ok(None);
+        }
+        // Placeholder: send a TaskUpdate response indicating the action was received.
+        // Full integration with TaskManager will replace this.
+        let response = BridgeMessage::TaskUpdate {
+            room_id: self.room_id.clone(),
+            task: super::protocol::BridgeTaskInfo {
+                task_id: String::new(),
+                title: String::new(),
+                status: "pending".to_string(),
+                assignee: None,
+                created_by: self.peer_id.clone(),
+            },
+        };
+        let _ = self.conn.write_message(&response).await;
+        Ok(None)
     }
 
     /// Gracefully closes the agent connection.
@@ -891,6 +974,156 @@ mod tests {
         for i in 0..3 {
             let outbound = outbound_rx.try_recv().expect("outbound");
             assert_eq!(outbound.content, format!("message {i}"));
+        }
+    }
+
+    // --- Task message capability tests (task #14) ---
+
+    #[tokio::test]
+    async fn create_task_without_capability_returns_error() {
+        let (conn, mut reader, mut writer, _bridge) = setup_pair("create-task-no-cap").await;
+        let (outbound_tx, _outbound_rx) = mpsc::channel(64);
+        let (_room_tx, room_rx) = mpsc::channel(64);
+
+        let mut participant =
+            AgentParticipant::new(conn, "room-1", "agent:bot", "Bot", outbound_tx, room_rx);
+        participant.mark_ready();
+        // No capabilities set
+
+        let msg = AgentMessage::CreateTask {
+            title: "Fix bug".to_string(),
+        };
+        write_agent_msg(&mut writer, &msg).await;
+
+        let agent_msg = participant.conn.read_message().await.expect("read");
+        let result = participant.handle_agent_message(agent_msg).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+
+        let response = read_bridge_msg(&mut reader).await;
+        match response {
+            BridgeMessage::Error { code, message } => {
+                assert_eq!(code, "capability_required");
+                assert!(message.contains("TaskManagement"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_task_with_capability_returns_task_update() {
+        let (conn, mut reader, mut writer, _bridge) = setup_pair("create-task-with-cap").await;
+        let (outbound_tx, _outbound_rx) = mpsc::channel(64);
+        let (_room_tx, room_rx) = mpsc::channel(64);
+
+        let mut participant =
+            AgentParticipant::new(conn, "room-1", "agent:bot", "Bot", outbound_tx, room_rx);
+        participant.mark_ready();
+        participant.set_capabilities(vec!["task_management".to_string()]);
+
+        let msg = AgentMessage::CreateTask {
+            title: "Fix bug".to_string(),
+        };
+        write_agent_msg(&mut writer, &msg).await;
+
+        let agent_msg = participant.conn.read_message().await.expect("read");
+        let result = participant.handle_agent_message(agent_msg).await;
+        assert!(result.is_ok());
+
+        let response = read_bridge_msg(&mut reader).await;
+        assert!(matches!(response, BridgeMessage::TaskUpdate { .. }));
+    }
+
+    #[tokio::test]
+    async fn list_tasks_without_capability_returns_error() {
+        let (conn, mut reader, mut writer, _bridge) = setup_pair("list-tasks-no-cap").await;
+        let (outbound_tx, _outbound_rx) = mpsc::channel(64);
+        let (_room_tx, room_rx) = mpsc::channel(64);
+
+        let mut participant =
+            AgentParticipant::new(conn, "room-1", "agent:bot", "Bot", outbound_tx, room_rx);
+        participant.mark_ready();
+
+        write_agent_msg(&mut writer, &AgentMessage::ListTasks).await;
+
+        let agent_msg = participant.conn.read_message().await.expect("read");
+        let result = participant.handle_agent_message(agent_msg).await;
+        assert!(result.is_ok());
+
+        let response = read_bridge_msg(&mut reader).await;
+        match response {
+            BridgeMessage::Error { code, .. } => assert_eq!(code, "capability_required"),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_tasks_with_capability_returns_empty_list() {
+        let (conn, mut reader, mut writer, _bridge) = setup_pair("list-tasks-with-cap").await;
+        let (outbound_tx, _outbound_rx) = mpsc::channel(64);
+        let (_room_tx, room_rx) = mpsc::channel(64);
+
+        let mut participant =
+            AgentParticipant::new(conn, "room-1", "agent:bot", "Bot", outbound_tx, room_rx);
+        participant.mark_ready();
+        participant.set_capabilities(vec!["task_management".to_string()]);
+
+        write_agent_msg(&mut writer, &AgentMessage::ListTasks).await;
+
+        let agent_msg = participant.conn.read_message().await.expect("read");
+        let result = participant.handle_agent_message(agent_msg).await;
+        assert!(result.is_ok());
+
+        let response = read_bridge_msg(&mut reader).await;
+        match response {
+            BridgeMessage::TaskList { room_id, tasks } => {
+                assert_eq!(room_id, "room-1");
+                assert!(tasks.is_empty());
+            }
+            other => panic!("expected TaskList, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn has_capability_checks_correctly() {
+        let (conn, _reader, _writer, _bridge) = setup_pair("cap-check").await;
+        let (outbound_tx, _outbound_rx) = mpsc::channel(64);
+        let (_room_tx, room_rx) = mpsc::channel(64);
+
+        let mut participant =
+            AgentParticipant::new(conn, "room-1", "agent:bot", "Bot", outbound_tx, room_rx);
+
+        assert!(!participant.has_capability("task_management"));
+        participant.set_capabilities(vec!["chat".to_string(), "task_management".to_string()]);
+        assert!(participant.has_capability("task_management"));
+        assert!(participant.has_capability("chat"));
+        assert!(!participant.has_capability("admin"));
+    }
+
+    #[tokio::test]
+    async fn update_task_status_without_capability_returns_error() {
+        let (conn, mut reader, mut writer, _bridge) = setup_pair("update-status-no-cap").await;
+        let (outbound_tx, _outbound_rx) = mpsc::channel(64);
+        let (_room_tx, room_rx) = mpsc::channel(64);
+
+        let mut participant =
+            AgentParticipant::new(conn, "room-1", "agent:bot", "Bot", outbound_tx, room_rx);
+        participant.mark_ready();
+
+        let msg = AgentMessage::UpdateTaskStatus {
+            task_id: "t-1".to_string(),
+            status: "completed".to_string(),
+        };
+        write_agent_msg(&mut writer, &msg).await;
+
+        let agent_msg = participant.conn.read_message().await.expect("read");
+        let result = participant.handle_agent_message(agent_msg).await;
+        assert!(result.is_ok());
+
+        let response = read_bridge_msg(&mut reader).await;
+        match response {
+            BridgeMessage::Error { code, .. } => assert_eq!(code, "capability_required"),
+            other => panic!("expected Error, got {other:?}"),
         }
     }
 }

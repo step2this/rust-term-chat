@@ -11,6 +11,56 @@ pub enum PanelFocus {
     Sidebar,
     /// Chat message list is focused.
     Chat,
+    /// Task panel is focused.
+    Tasks,
+}
+
+/// Display status for a task in the task panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskDisplayStatus {
+    /// Task is open / not started.
+    Open,
+    /// Task is currently being worked on.
+    InProgress,
+    /// Task has been completed.
+    Completed,
+}
+
+impl TaskDisplayStatus {
+    /// Get the display symbol for this status.
+    #[must_use]
+    pub const fn symbol(&self) -> &'static str {
+        match self {
+            Self::Open => "[ ]",
+            Self::InProgress => "[~]",
+            Self::Completed => "[x]",
+        }
+    }
+
+    /// Cycle to the next status: `Open` -> `InProgress` -> `Completed` -> `Open`.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Open => Self::InProgress,
+            Self::InProgress => Self::Completed,
+            Self::Completed => Self::Open,
+        }
+    }
+}
+
+/// A task for display in the task panel.
+#[derive(Debug, Clone)]
+pub struct DisplayTask {
+    /// Unique task ID (for CRDT integration).
+    pub id: String,
+    /// Human-readable title.
+    pub title: String,
+    /// Current display status.
+    pub status: TaskDisplayStatus,
+    /// Optional assignee name.
+    pub assignee: Option<String>,
+    /// Sequential task number (displayed as #N).
+    pub number: usize,
 }
 
 /// A message for display in the chat panel.
@@ -85,6 +135,10 @@ pub struct App {
     pub selected_conversation: usize,
     /// Whether the app should quit.
     pub should_quit: bool,
+    /// Tasks displayed in the task panel.
+    pub tasks: Vec<DisplayTask>,
+    /// Currently selected task index.
+    pub selected_task: usize,
 }
 
 impl App {
@@ -185,6 +239,8 @@ impl App {
             conversations,
             selected_conversation: 0,
             should_quit: false,
+            tasks: Vec::new(),
+            selected_task: 0,
         }
     }
 
@@ -212,6 +268,7 @@ impl App {
             PanelFocus::Input => self.handle_input_key(key),
             PanelFocus::Sidebar => self.handle_sidebar_key(key),
             PanelFocus::Chat => self.handle_chat_key(key),
+            PanelFocus::Tasks => self.handle_tasks_key(key),
         }
     }
 
@@ -247,19 +304,168 @@ impl App {
         }
     }
 
-    /// Cycle focus forward: Input -> Sidebar -> Chat -> Input.
+    /// Handle key event when task panel is focused.
+    fn handle_tasks_key(&mut self, key: KeyEvent) {
+        if self.tasks.is_empty() {
+            return;
+        }
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.selected_task + 1 < self.tasks.len() {
+                    self.selected_task += 1;
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.selected_task = self.selected_task.saturating_sub(1);
+            }
+            KeyCode::Enter => {
+                let task = &mut self.tasks[self.selected_task];
+                task.status = task.status.next();
+            }
+            _ => {}
+        }
+    }
+
+    /// Handle the `/task` command with subcommands.
+    fn handle_task_command(&mut self, args: &str) {
+        let parts: Vec<&str> = args.splitn(2, ' ').collect();
+        let subcommand = parts[0];
+        let sub_args = parts.get(1).copied().unwrap_or("").trim();
+
+        match subcommand {
+            "add" => self.task_cmd_add(sub_args),
+            "done" => self.task_cmd_done(sub_args),
+            "assign" => self.task_cmd_assign(sub_args),
+            "delete" => self.task_cmd_delete(sub_args),
+            "list" => self.task_cmd_list(),
+            _ => {
+                self.push_system_message("Usage: /task add|done|assign|delete|list".to_string());
+            }
+        }
+    }
+
+    /// Maximum task title length in characters.
+    const MAX_TASK_TITLE_LEN: usize = 256;
+
+    /// `/task add <title>` — create a new task.
+    fn task_cmd_add(&mut self, title: &str) {
+        if title.is_empty() {
+            self.push_system_message("Task title cannot be empty".to_string());
+            return;
+        }
+        if title.len() > Self::MAX_TASK_TITLE_LEN {
+            self.push_system_message(format!(
+                "Task title too long (max {} characters)",
+                Self::MAX_TASK_TITLE_LEN
+            ));
+            return;
+        }
+        let number = self.tasks.iter().map(|t| t.number).max().unwrap_or(0) + 1;
+        self.tasks.push(DisplayTask {
+            id: format!("local-{number}"),
+            title: title.to_string(),
+            status: TaskDisplayStatus::Open,
+            assignee: None,
+            number,
+        });
+        self.push_system_message(format!("Task created: {title}"));
+    }
+
+    /// `/task done <number>` — mark a task as completed.
+    fn task_cmd_done(&mut self, args: &str) {
+        let Some(number) = args.parse::<usize>().ok() else {
+            self.push_system_message("Usage: /task done <number>".to_string());
+            return;
+        };
+        if let Some(task) = self.tasks.iter_mut().find(|t| t.number == number) {
+            task.status = TaskDisplayStatus::Completed;
+            self.push_system_message(format!("Task #{number} marked as completed"));
+        } else {
+            self.push_system_message(format!("Task #{number} not found"));
+        }
+    }
+
+    /// `/task assign <number> @<name>` — assign a task.
+    fn task_cmd_assign(&mut self, args: &str) {
+        let parts: Vec<&str> = args.splitn(2, ' ').collect();
+        if parts.len() < 2 {
+            self.push_system_message("Usage: /task assign <number> @<name>".to_string());
+            return;
+        }
+        let Some(number) = parts[0].parse::<usize>().ok() else {
+            self.push_system_message("Usage: /task assign <number> @<name>".to_string());
+            return;
+        };
+        let name = parts[1].trim_start_matches('@').trim();
+        if name.is_empty() {
+            self.push_system_message("Usage: /task assign <number> @<name>".to_string());
+            return;
+        }
+        if let Some(task) = self.tasks.iter_mut().find(|t| t.number == number) {
+            task.assignee = Some(name.to_string());
+            self.push_system_message(format!("Task #{number} assigned to {name}"));
+        } else {
+            self.push_system_message(format!("Task #{number} not found"));
+        }
+    }
+
+    /// `/task delete <number>` — remove a task.
+    fn task_cmd_delete(&mut self, args: &str) {
+        let Some(number) = args.parse::<usize>().ok() else {
+            self.push_system_message("Usage: /task delete <number>".to_string());
+            return;
+        };
+        let before = self.tasks.len();
+        self.tasks.retain(|t| t.number != number);
+        if self.tasks.len() < before {
+            // Adjust selected_task if needed
+            if self.selected_task >= self.tasks.len() && !self.tasks.is_empty() {
+                self.selected_task = self.tasks.len() - 1;
+            }
+            self.push_system_message(format!("Task #{number} deleted"));
+        } else {
+            self.push_system_message(format!("Task #{number} not found"));
+        }
+    }
+
+    /// `/task list` — list all tasks as system messages.
+    fn task_cmd_list(&mut self) {
+        if self.tasks.is_empty() {
+            self.push_system_message("No tasks".to_string());
+            return;
+        }
+        let lines: Vec<String> = self
+            .tasks
+            .iter()
+            .map(|task| {
+                let assignee_str = task
+                    .assignee
+                    .as_ref()
+                    .map_or(String::new(), |a| format!(" (@{a})"));
+                let status = task.status.symbol();
+                format!("#{} {status} {}{assignee_str}", task.number, task.title)
+            })
+            .collect();
+        for line in lines {
+            self.push_system_message(line);
+        }
+    }
+
+    /// Cycle focus forward: Input -> Sidebar -> Chat -> Tasks -> Input.
     const fn cycle_focus_forward(&mut self) {
         self.focus = match self.focus {
             PanelFocus::Input => PanelFocus::Sidebar,
             PanelFocus::Sidebar => PanelFocus::Chat,
-            PanelFocus::Chat => PanelFocus::Input,
+            PanelFocus::Chat => PanelFocus::Tasks,
+            PanelFocus::Tasks => PanelFocus::Input,
         };
     }
 
-    /// Cycle focus backward: Input -> Chat -> Sidebar -> Input.
+    /// Cycle focus backward: Input -> Tasks -> Chat -> Sidebar -> Input.
     const fn cycle_focus_backward(&mut self) {
         self.focus = match self.focus {
-            PanelFocus::Input => PanelFocus::Chat,
+            PanelFocus::Input => PanelFocus::Tasks,
+            PanelFocus::Tasks => PanelFocus::Chat,
             PanelFocus::Chat => PanelFocus::Sidebar,
             PanelFocus::Sidebar => PanelFocus::Input,
         };
@@ -304,6 +510,7 @@ impl App {
 
         match command {
             "/invite-agent" => self.handle_invite_agent(args),
+            "/task" => self.handle_task_command(args),
             _ => {
                 self.push_system_message(format!("Unknown command: {command}"));
             }
@@ -504,5 +711,338 @@ mod tests {
         let mut app = App::new();
         app.push_system_message("test".to_string());
         assert_eq!(app.message_scroll, app.messages.len() - 1);
+    }
+
+    #[test]
+    fn focus_cycle_forward_includes_tasks() {
+        let mut app = App::new();
+        assert_eq!(app.focus, PanelFocus::Input);
+        app.cycle_focus_forward();
+        assert_eq!(app.focus, PanelFocus::Sidebar);
+        app.cycle_focus_forward();
+        assert_eq!(app.focus, PanelFocus::Chat);
+        app.cycle_focus_forward();
+        assert_eq!(app.focus, PanelFocus::Tasks);
+        app.cycle_focus_forward();
+        assert_eq!(app.focus, PanelFocus::Input);
+    }
+
+    #[test]
+    fn focus_cycle_backward_includes_tasks() {
+        let mut app = App::new();
+        assert_eq!(app.focus, PanelFocus::Input);
+        app.cycle_focus_backward();
+        assert_eq!(app.focus, PanelFocus::Tasks);
+        app.cycle_focus_backward();
+        assert_eq!(app.focus, PanelFocus::Chat);
+        app.cycle_focus_backward();
+        assert_eq!(app.focus, PanelFocus::Sidebar);
+        app.cycle_focus_backward();
+        assert_eq!(app.focus, PanelFocus::Input);
+    }
+
+    #[test]
+    fn new_app_has_empty_tasks() {
+        let app = App::new();
+        assert!(app.tasks.is_empty());
+        assert_eq!(app.selected_task, 0);
+    }
+
+    #[test]
+    fn task_display_status_symbols() {
+        assert_eq!(TaskDisplayStatus::Open.symbol(), "[ ]");
+        assert_eq!(TaskDisplayStatus::InProgress.symbol(), "[~]");
+        assert_eq!(TaskDisplayStatus::Completed.symbol(), "[x]");
+    }
+
+    #[test]
+    fn task_display_status_next_cycle() {
+        assert_eq!(
+            TaskDisplayStatus::Open.next(),
+            TaskDisplayStatus::InProgress
+        );
+        assert_eq!(
+            TaskDisplayStatus::InProgress.next(),
+            TaskDisplayStatus::Completed
+        );
+        assert_eq!(TaskDisplayStatus::Completed.next(), TaskDisplayStatus::Open);
+    }
+
+    // --- /task command tests (task #8) ---
+
+    #[test]
+    fn task_add_creates_task() {
+        let mut app = App::new();
+        submit_input(&mut app, "/task add Fix the bug");
+        assert_eq!(app.tasks.len(), 1);
+        assert_eq!(app.tasks[0].title, "Fix the bug");
+        assert_eq!(app.tasks[0].number, 1);
+        assert_eq!(app.tasks[0].status, TaskDisplayStatus::Open);
+        assert!(app.tasks[0].assignee.is_none());
+    }
+
+    #[test]
+    fn task_add_auto_increments_number() {
+        let mut app = App::new();
+        submit_input(&mut app, "/task add First");
+        submit_input(&mut app, "/task add Second");
+        submit_input(&mut app, "/task add Third");
+        assert_eq!(app.tasks[0].number, 1);
+        assert_eq!(app.tasks[1].number, 2);
+        assert_eq!(app.tasks[2].number, 3);
+    }
+
+    #[test]
+    fn task_add_no_title_shows_error() {
+        let mut app = App::new();
+        let initial_count = app.messages.len();
+        submit_input(&mut app, "/task add");
+        assert!(app.tasks.is_empty());
+        let last = &app.messages[app.messages.len() - 1];
+        assert_eq!(last.sender, "System");
+        assert!(last.content.contains("title cannot be empty"));
+        assert!(app.messages.len() > initial_count);
+    }
+
+    #[test]
+    fn task_add_pushes_system_message() {
+        let mut app = App::new();
+        let initial_count = app.messages.len();
+        submit_input(&mut app, "/task add Write tests");
+        let last = &app.messages[app.messages.len() - 1];
+        assert_eq!(last.sender, "System");
+        assert!(last.content.contains("Task created: Write tests"));
+        assert!(app.messages.len() > initial_count);
+    }
+
+    #[test]
+    fn task_done_marks_completed() {
+        let mut app = App::new();
+        submit_input(&mut app, "/task add My task");
+        submit_input(&mut app, "/task done 1");
+        assert_eq!(app.tasks[0].status, TaskDisplayStatus::Completed);
+        let last = &app.messages[app.messages.len() - 1];
+        assert!(last.content.contains("Task #1 marked as completed"));
+    }
+
+    #[test]
+    fn task_done_not_found() {
+        let mut app = App::new();
+        submit_input(&mut app, "/task done 99");
+        let last = &app.messages[app.messages.len() - 1];
+        assert!(last.content.contains("Task #99 not found"));
+    }
+
+    #[test]
+    fn task_assign_sets_assignee() {
+        let mut app = App::new();
+        submit_input(&mut app, "/task add Review PR");
+        submit_input(&mut app, "/task assign 1 @alice");
+        assert_eq!(app.tasks[0].assignee.as_deref(), Some("alice"));
+        let last = &app.messages[app.messages.len() - 1];
+        assert!(last.content.contains("Task #1 assigned to alice"));
+    }
+
+    #[test]
+    fn task_assign_without_at_prefix() {
+        let mut app = App::new();
+        submit_input(&mut app, "/task add Review PR");
+        submit_input(&mut app, "/task assign 1 bob");
+        assert_eq!(app.tasks[0].assignee.as_deref(), Some("bob"));
+    }
+
+    #[test]
+    fn task_delete_removes_task() {
+        let mut app = App::new();
+        submit_input(&mut app, "/task add First");
+        submit_input(&mut app, "/task add Second");
+        assert_eq!(app.tasks.len(), 2);
+        submit_input(&mut app, "/task delete 1");
+        assert_eq!(app.tasks.len(), 1);
+        assert_eq!(app.tasks[0].title, "Second");
+        let last = &app.messages[app.messages.len() - 1];
+        assert!(last.content.contains("Task #1 deleted"));
+    }
+
+    #[test]
+    fn task_delete_not_found() {
+        let mut app = App::new();
+        submit_input(&mut app, "/task delete 42");
+        let last = &app.messages[app.messages.len() - 1];
+        assert!(last.content.contains("Task #42 not found"));
+    }
+
+    #[test]
+    fn task_list_empty() {
+        let mut app = App::new();
+        submit_input(&mut app, "/task list");
+        let last = &app.messages[app.messages.len() - 1];
+        assert!(last.content.contains("No tasks"));
+    }
+
+    #[test]
+    fn task_list_shows_all() {
+        let mut app = App::new();
+        submit_input(&mut app, "/task add Alpha");
+        submit_input(&mut app, "/task add Beta");
+        let before = app.messages.len();
+        submit_input(&mut app, "/task list");
+        // Should have added 2 system messages (one per task)
+        assert_eq!(app.messages.len(), before + 2);
+        assert!(app.messages[before].content.contains("#1 [ ] Alpha"));
+        assert!(app.messages[before + 1].content.contains("#2 [ ] Beta"));
+    }
+
+    #[test]
+    fn task_list_shows_assignee() {
+        let mut app = App::new();
+        submit_input(&mut app, "/task add Do thing");
+        submit_input(&mut app, "/task assign 1 @carol");
+        let before = app.messages.len();
+        submit_input(&mut app, "/task list");
+        assert!(app.messages[before].content.contains("(@carol)"));
+    }
+
+    #[test]
+    fn task_unknown_subcommand_shows_usage() {
+        let mut app = App::new();
+        submit_input(&mut app, "/task foobar");
+        let last = &app.messages[app.messages.len() - 1];
+        assert!(
+            last.content
+                .contains("Usage: /task add|done|assign|delete|list")
+        );
+    }
+
+    // --- Keyboard handling tests (task #10) ---
+
+    /// Helper: create a key event for a simple key code.
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// Helper: add some tasks to the app and focus the task panel.
+    fn app_with_tasks() -> App {
+        let mut app = App::new();
+        submit_input(&mut app, "/task add First");
+        submit_input(&mut app, "/task add Second");
+        submit_input(&mut app, "/task add Third");
+        app.focus = PanelFocus::Tasks;
+        app.selected_task = 0;
+        app
+    }
+
+    #[test]
+    fn tasks_key_down_moves_selection() {
+        let mut app = app_with_tasks();
+        app.handle_tasks_key(key(KeyCode::Down));
+        assert_eq!(app.selected_task, 1);
+        app.handle_tasks_key(key(KeyCode::Char('j')));
+        assert_eq!(app.selected_task, 2);
+    }
+
+    #[test]
+    fn tasks_key_down_clamps_at_end() {
+        let mut app = app_with_tasks();
+        app.selected_task = 2;
+        app.handle_tasks_key(key(KeyCode::Down));
+        assert_eq!(app.selected_task, 2);
+    }
+
+    #[test]
+    fn tasks_key_up_moves_selection() {
+        let mut app = app_with_tasks();
+        app.selected_task = 2;
+        app.handle_tasks_key(key(KeyCode::Up));
+        assert_eq!(app.selected_task, 1);
+        app.handle_tasks_key(key(KeyCode::Char('k')));
+        assert_eq!(app.selected_task, 0);
+    }
+
+    #[test]
+    fn tasks_key_up_clamps_at_zero() {
+        let mut app = app_with_tasks();
+        app.selected_task = 0;
+        app.handle_tasks_key(key(KeyCode::Up));
+        assert_eq!(app.selected_task, 0);
+    }
+
+    #[test]
+    fn tasks_key_enter_toggles_status() {
+        let mut app = app_with_tasks();
+        assert_eq!(app.tasks[0].status, TaskDisplayStatus::Open);
+        app.handle_tasks_key(key(KeyCode::Enter));
+        assert_eq!(app.tasks[0].status, TaskDisplayStatus::InProgress);
+        app.handle_tasks_key(key(KeyCode::Enter));
+        assert_eq!(app.tasks[0].status, TaskDisplayStatus::Completed);
+        app.handle_tasks_key(key(KeyCode::Enter));
+        assert_eq!(app.tasks[0].status, TaskDisplayStatus::Open);
+    }
+
+    #[test]
+    fn tasks_key_empty_tasks_does_nothing() {
+        let mut app = App::new();
+        app.focus = PanelFocus::Tasks;
+        // Should not panic
+        app.handle_tasks_key(key(KeyCode::Down));
+        app.handle_tasks_key(key(KeyCode::Up));
+        app.handle_tasks_key(key(KeyCode::Enter));
+        assert_eq!(app.selected_task, 0);
+    }
+
+    // --- Command validation extension tests (task #9) ---
+
+    #[test]
+    fn task_add_title_too_long() {
+        let mut app = App::new();
+        let long_title = "x".repeat(257);
+        submit_input(&mut app, &format!("/task add {long_title}"));
+        assert!(app.tasks.is_empty());
+        let last = &app.messages[app.messages.len() - 1];
+        assert!(last.content.contains("title too long"));
+    }
+
+    #[test]
+    fn task_add_title_exactly_max_length() {
+        let mut app = App::new();
+        let title = "y".repeat(256);
+        submit_input(&mut app, &format!("/task add {title}"));
+        assert_eq!(app.tasks.len(), 1);
+        assert_eq!(app.tasks[0].title, title);
+    }
+
+    #[test]
+    fn task_done_invalid_number() {
+        let mut app = App::new();
+        submit_input(&mut app, "/task done abc");
+        let last = &app.messages[app.messages.len() - 1];
+        assert!(last.content.contains("Usage:"));
+    }
+
+    #[test]
+    fn task_assign_missing_name() {
+        let mut app = App::new();
+        submit_input(&mut app, "/task add Test");
+        submit_input(&mut app, "/task assign 1");
+        let last = &app.messages[app.messages.len() - 1];
+        assert!(last.content.contains("Usage:"));
+    }
+
+    #[test]
+    fn task_assign_not_found() {
+        let mut app = App::new();
+        submit_input(&mut app, "/task assign 99 @bob");
+        let last = &app.messages[app.messages.len() - 1];
+        assert!(last.content.contains("Task #99 not found"));
+    }
+
+    #[test]
+    fn task_delete_adjusts_selected_task() {
+        let mut app = App::new();
+        submit_input(&mut app, "/task add A");
+        submit_input(&mut app, "/task add B");
+        app.selected_task = 1; // pointing at B
+        submit_input(&mut app, "/task delete 2"); // delete B
+        assert_eq!(app.selected_task, 0); // should adjust down
     }
 }

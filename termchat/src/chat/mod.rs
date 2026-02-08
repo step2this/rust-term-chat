@@ -519,8 +519,9 @@ impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
                 );
                 // For now, just log. Future work: update message status to Failed.
             }
-            Envelope::Handshake(_) => {
-                // Handshake messages are handled by the crypto layer (UC-005).
+            Envelope::Handshake(_) | Envelope::TaskSync(_) => {
+                // Handshake: handled by the crypto layer (UC-005).
+                // TaskSync: handled by the tasks module (UC-008).
             }
         }
 

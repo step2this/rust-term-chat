@@ -301,6 +301,11 @@ pub enum Envelope {
     Nack(Nack),
     /// A handshake message (opaque bytes, interpreted by the crypto layer).
     Handshake(Vec<u8>),
+    /// A task sync message (opaque bytes, postcard-encoded [`TaskSyncMessage`]).
+    ///
+    /// Carried as opaque bytes to keep the `Envelope` codec decoupled from
+    /// task types. Decode with [`crate::task::decode`].
+    TaskSync(Vec<u8>),
 }
 
 #[cfg(test)]
