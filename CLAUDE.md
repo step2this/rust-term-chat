@@ -151,6 +151,7 @@ Cockburn-style use cases in `docs/use-cases/`. Always check the relevant use cas
 - When builders work on the same crate, run `cargo clippy` at workspace level (`cargo clippy -- -D warnings`), not per-crate
 - Git worktree (`git worktree add ../dir -b feature/uc-NNN`) enables parallel UC development without conflict risk — essential when two features touch overlapping files
 - Opaque envelope payloads (`Envelope::Feature(Vec<u8>)` with app-layer decode) scale indefinitely without bloating the wire format enum — standard pattern for domain-specific message types
+- **ALWAYS USE THE FORGE. ALWAYS WORK OFF OF A WORKTREE TO ALLOW MULTIPLE AGENTS.** UC doc first (`/uc-create`), then task decomposition (`/task-decompose`), then implement on a feature branch via `git worktree add`. Never skip straight to code on main.
 - Single-agent implementation is sufficient for medium-complexity UCs that follow established patterns; full Forge workflow (team, task-decompose) reserved for novel/high-complexity work
 - When parallel agents create overlapping module files (e.g., `config.rs` vs `config/mod.rs`), the Lead must resolve the conflict before quality gate — Rust panics on dual module paths
 - Add workspace dependencies to root Cargo.toml BEFORE spawning parallel agents — prevents Cargo.toml merge conflicts
