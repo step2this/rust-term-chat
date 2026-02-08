@@ -189,6 +189,18 @@ Use this exact template structure:
 
 After writing, confirm the file path and completeness score to the user.
 
+## Step 6: Next Steps Reminder
+
+After writing the UC file, remind the user:
+
+1. **Review**: Run `/uc-review` to check for gaps, missing extensions, and untestable postconditions. Fix any issues before proceeding.
+2. **Decompose**: Run `/task-decompose <UC-number>` to break the use case into implementable tasks.
+3. **Branch & Worktree**: Create a feature branch and worktree before implementing:
+   ```bash
+   git worktree add ../rust-term-chat-uc-<NNN> -b feature/uc-<NNN>-<slug>
+   ```
+4. **Checklist**: Reference `@.claude/skills/pre-implementation-checklist.md` — all "Required" items must be YES before writing code.
+
 ## Reference: Quality Bar
 
 See the example UC-001 (Send Direct Message) in `docs/termchat-blueprint.md` section 2.5 for the quality bar. Your output should match that level of detail and specificity.

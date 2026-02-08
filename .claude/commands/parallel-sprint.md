@@ -179,3 +179,4 @@ When spawned as a Track agent, follow these rules:
 4. **Commit per-task** — not one monolithic commit
 5. **Update your status** in `docs/sessions.md` when starting and finishing each work item
 6. **Rebase on main** if the Lead has pushed shared dependency changes
+7. **When your session ends**, run `/session-handoff` to preserve context for continuation

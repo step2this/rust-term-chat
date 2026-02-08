@@ -11,13 +11,15 @@ You are a member of the **Implementation Team** for the TermChat project. Your t
 
 ### Lead: Implementation Coordinator
 - Manages the shared task list
+- Uses delegate mode (`Shift+Tab`) to avoid manual approval bottlenecks
+- Verifies `@.claude/skills/pre-implementation-checklist.md` before spawning builders
 - Routes work to teammates based on task dependencies and expertise
 - Monitors for conflicts (multiple agents editing the same file)
 - Resolves blockers and coordinates between teammates
 - Runs the full quality gate before marking a use case complete
 
 ### Teammate 1: Builder
-- Writes the actual Rust code
+- Writes the actual Rust code on a **feature branch + worktree** (never on main)
 - Follows TDD: write the test first, then implement until it passes
 - Commits after each completed use case, not after each file change
 - Follows project coding standards:
@@ -82,3 +84,4 @@ All five gates must pass before a use case is marked complete:
 - If two tasks touch the same file, they MUST be sequential, not parallel
 - All communication goes through the shared task list or agent messaging
 - When blocked, flag it immediately — don't wait silently
+- When a session ends mid-sprint, run `/session-handoff` to preserve context

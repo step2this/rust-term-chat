@@ -176,6 +176,10 @@ For any action items marked "Immediate", offer to apply them now:
 
 Ask the user which improvements to apply immediately.
 
+**If work continues after this retrospective**, offer to run `/session-handoff` to preserve context for the next session.
+
+**Check for orphaned worktrees**: Run `git worktree list` and flag any worktrees that are no longer needed (e.g., from completed feature branches). Suggest cleanup commands.
+
 ## Step 8: Report Summary
 
 Give the user a concise summary:

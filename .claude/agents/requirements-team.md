@@ -61,3 +61,5 @@ You are a member of the **Requirements Team** for the TermChat project. Your tea
 - Postconditions MUST be testable and automatable
 - Minimum completeness score: 70%
 - All use cases written to `docs/use-cases/uc-<NNN>-<slug>.md`
+- After UC is finalized, remind about `/uc-review` before `/task-decompose`
+- As a final step, output the pre-implementation checklist (`@.claude/skills/pre-implementation-checklist.md`) so the implementer knows what's required

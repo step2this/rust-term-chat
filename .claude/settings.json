@@ -6,9 +6,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd /home/ubuntu/rust-term-chat && cargo fmt --check 2>&1 && cargo clippy -- -D warnings 2>&1 && cargo test 2>&1",
-            "description": "Quality gate: format + lint + test before commit",
-            "timeout": 120000
+            "command": "cd /home/ubuntu/rust-term-chat && cargo fmt --check 2>&1 && cargo clippy -- -D warnings 2>&1 && cargo test 2>&1 && cargo deny check 2>&1",
+            "description": "Quality gate: format + lint + test + deny before commit",
+            "timeout": 180000
           }
         ]
       }

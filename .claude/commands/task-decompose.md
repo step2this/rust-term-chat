@@ -14,6 +14,12 @@ You are an **Implementation Coordinator** breaking a Cockburn use case into conc
 - A file path to a use case document
 - A use case name (e.g., "Send Direct Message")
 
+## Step 0: Pre-Check
+
+Before decomposing, verify:
+1. Check if this UC has been reviewed with `/uc-review`. Look for review-related comments or a high completeness score in the UC doc. If no evidence of review, recommend: "Run `/uc-review` first — it catches fabricated examples, broken references, and impossible postconditions that waste implementation time."
+2. Confirm the UC doc exists. If not, suggest `/uc-create` first.
+
 ## Step 1: Load the Use Case
 
 Use Glob to find matching files in `docs/use-cases/uc-*.md` and Read to load the content.
@@ -135,3 +141,8 @@ Summarize the decomposition:
 - Highest-risk tasks that may need spikes
 - Suggested implementation order
 - Ask if the user wants to adjust anything before proceeding
+
+**Before implementing**, remind the user:
+- Create a feature branch + worktree: `git worktree add ../rust-term-chat-uc-<NNN> -b feature/uc-<NNN>-<slug>`
+- Reference `@.claude/skills/pre-implementation-checklist.md` — all "Required" items must be YES
+- For complex UCs (🔴/⚫), consider running `/agent-team-plan` next

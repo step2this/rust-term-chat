@@ -113,11 +113,13 @@ When running multi-agent teams, assign module ownership to prevent merge conflic
 - All public functions must have doc comments
 - No `unwrap()` in production code — use `Result` with `thiserror`
 - Commit after each completed use case, not after each file change — never bundle multiple UCs into one commit
-- Always run `/task-decompose` before implementing, even for small use cases
+- **ALWAYS USE THE FORGE.** UC doc first (`/uc-create`), then `/uc-review`, then `/task-decompose`, then implement on a feature branch via `git worktree add`. Never skip straight to code on main. Reference `@.claude/skills/pre-implementation-checklist.md` before starting.
 - Always include a reviewer agent in team configurations
 - Keep agent tasks scoped to <20 tool calls to avoid context kills
 - Builders must run `cargo fmt` and `cargo clippy -p <crate> -- -D warnings` before marking any task complete (not just at final gate)
 - When spawning builder agents, include explicit "claim task #N immediately" in the prompt
+- Use delegate mode (`Shift+Tab`) when running as team lead to avoid manual approval bottlenecks
+- Set `plan_mode_required: true` for teammate agents — they must present a plan before implementing
 
 ## Test Strategy
 
@@ -152,7 +154,7 @@ Cockburn-style use cases in `docs/use-cases/`. Always check the relevant use cas
 - When builders work on the same crate, run `cargo clippy` at workspace level (`cargo clippy -- -D warnings`), not per-crate
 - Git worktree (`git worktree add ../dir -b feature/uc-NNN`) enables parallel UC development without conflict risk — essential when two features touch overlapping files
 - Opaque envelope payloads (`Envelope::Feature(Vec<u8>)` with app-layer decode) scale indefinitely without bloating the wire format enum — standard pattern for domain-specific message types
-- **ALWAYS USE THE FORGE. ALWAYS WORK OFF OF A WORKTREE TO ALLOW MULTIPLE AGENTS.** UC doc first (`/uc-create`), then task decomposition (`/task-decompose`), then implement on a feature branch via `git worktree add`. Never skip straight to code on main.
+- Always work off of a worktree to allow multiple agents — `git worktree add` for each feature branch
 - Single-agent implementation is sufficient for medium-complexity UCs that follow established patterns; full Forge workflow (team, task-decompose) reserved for novel/high-complexity work
 - When parallel agents create overlapping module files (e.g., `config.rs` vs `config/mod.rs`), the Lead must resolve the conflict before quality gate — Rust panics on dual module paths
 - Add workspace dependencies to root Cargo.toml BEFORE spawning parallel agents — prevents Cargo.toml merge conflicts
@@ -167,7 +169,7 @@ Cockburn-style use cases in `docs/use-cases/`. Always check the relevant use cas
 - The 20 tool-call guideline is per-task, not per-UC — a UC with 12 tasks at ~6 calls each is fine
 - Update docs (UC registry, sprint doc, backlog) as part of the sprint commit, not as a separate cleanup task — doc debt compounds silently
 - `cargo deny check` is now part of the quality gate; `deny.toml` at workspace root defines license allowlist and duplicate skip list
-- Apply all related edits to a file atomically to avoid linter revert thrashing (e.g., add import + struct field + usage in one pass, not sequentially)
+- Run `/session-handoff` before ending any session that has in-progress work — cross-session continuity prevents 20-30% context waste on archaeology
 - TCP proxy pattern for testing network failures — place a proxy between client and server, abort proxy tasks to simulate disconnect (causes immediate RST on both ends). `relay_handle.abort()` does NOT close existing WebSocket connections because axum handler tasks are independently spawned
 - In async shared-state code, always try-then-fallback, never check-then-act (TOCTOU race). E.g., try `send_message()`, queue on failure — don't check `is_connected` then send
 - Gate merge on reviewer approval — do not merge feature branch before review completes
