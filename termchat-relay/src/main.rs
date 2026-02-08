@@ -11,23 +11,43 @@
 //! cargo run --bin termchat-relay
 //!
 //! # Run on custom address
+//! cargo run --bin termchat-relay -- --bind 127.0.0.1:8080
+//!
+//! # Or via environment variable (backward compatible)
 //! RELAY_ADDR=127.0.0.1:8080 cargo run --bin termchat-relay
 //! ```
 
-use termchat_relay::relay;
+use std::sync::Arc;
 
-/// Default bind address for the relay server.
-const DEFAULT_ADDR: &str = "0.0.0.0:9000";
+use clap::Parser;
+use termchat_relay::config::{RelayCliArgs, RelayConfig};
+use termchat_relay::relay::{self, RelayState};
+use termchat_relay::store::MessageStore;
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
+    let cli = RelayCliArgs::parse();
 
-    let addr = std::env::var("RELAY_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.to_string());
+    // Load config from CLI args + config file + env vars + defaults.
+    let config = match RelayConfig::load(&cli) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error loading configuration: {e}");
+            std::process::exit(1);
+        }
+    };
 
-    tracing::info!(addr = %addr, "starting termchat relay server");
+    // Initialize tracing with the resolved log level.
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&config.log_level));
+    tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
-    match relay::start_server(&addr).await {
+    tracing::info!(addr = %config.bind_addr, "starting termchat relay server");
+
+    let store = MessageStore::with_max_queue_size(config.max_queue_size);
+    let state = Arc::new(RelayState::with_config(config.max_payload_size, store));
+
+    match relay::start_server_with_state(&config.bind_addr, state).await {
         Ok((bound_addr, handle)) => {
             tracing::info!(addr = %bound_addr, "relay server listening");
             if let Err(e) = handle.await {

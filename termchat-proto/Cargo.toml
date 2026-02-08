@@ -1,5 +1,6 @@
 [package]
 name = "termchat-proto"
+description = "Wire protocol library for TermChat"
 edition.workspace = true
 version.workspace = true
 license.workspace = true

@@ -8,8 +8,8 @@ use std::collections::{HashMap, VecDeque};
 use tokio::sync::RwLock;
 use tokio::time::Instant;
 
-/// Maximum number of queued messages per peer before FIFO eviction kicks in.
-const MAX_QUEUE_SIZE: usize = 1000;
+/// Default maximum number of queued messages per peer before FIFO eviction.
+const DEFAULT_MAX_QUEUE_SIZE: usize = 1000;
 
 /// A message stored for later delivery to an offline peer.
 #[derive(Debug, Clone)]
@@ -26,10 +26,11 @@ pub struct StoredMessage {
 /// In-memory per-peer message queue with FIFO eviction.
 ///
 /// Thread-safe via [`RwLock`]. Each peer has an independent queue capped at
-/// [`MAX_QUEUE_SIZE`] entries; when the cap is exceeded the oldest message
+/// a configurable maximum; when the cap is exceeded the oldest message
 /// is dropped.
 pub struct MessageStore {
     queues: RwLock<HashMap<String, VecDeque<StoredMessage>>>,
+    max_queue_size: usize,
 }
 
 impl Default for MessageStore {
@@ -39,18 +40,28 @@ impl Default for MessageStore {
 }
 
 impl MessageStore {
-    /// Creates a new, empty message store.
+    /// Creates a new, empty message store with the default queue size limit.
     #[must_use]
     pub fn new() -> Self {
         Self {
             queues: RwLock::new(HashMap::new()),
+            max_queue_size: DEFAULT_MAX_QUEUE_SIZE,
+        }
+    }
+
+    /// Creates a new, empty message store with a custom queue size limit.
+    #[must_use]
+    pub fn with_max_queue_size(max_queue_size: usize) -> Self {
+        Self {
+            queues: RwLock::new(HashMap::new()),
+            max_queue_size,
         }
     }
 
     /// Enqueues a message for the given peer, returning the new queue length.
     ///
-    /// If the peer's queue exceeds [`MAX_QUEUE_SIZE`], the oldest message is
-    /// evicted (FIFO).
+    /// If the peer's queue exceeds the configured maximum, the oldest message
+    /// is evicted (FIFO).
     #[allow(clippy::cast_possible_truncation)]
     pub async fn enqueue(&self, to: &str, from: &str, payload: Vec<u8>) -> u32 {
         let mut queues = self.queues.write().await;
@@ -60,10 +71,10 @@ impl MessageStore {
             payload,
             queued_at: Instant::now(),
         });
-        if queue.len() > MAX_QUEUE_SIZE {
+        if queue.len() > self.max_queue_size {
             queue.pop_front();
         }
-        // Safe: MAX_QUEUE_SIZE is 1000, well within u32 range.
+        // Safe: max_queue_size is bounded, well within u32 range.
         let len = queue.len() as u32;
         drop(queues);
         len

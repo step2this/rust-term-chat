@@ -18,8 +18,8 @@ use tokio::sync::{RwLock, mpsc};
 use crate::rooms::{self, RoomRegistry};
 use crate::store::MessageStore;
 
-/// Maximum allowed payload size in bytes (64 KB).
-const MAX_PAYLOAD_SIZE: usize = 64 * 1024;
+/// Default maximum allowed payload size in bytes (64 KB).
+const DEFAULT_MAX_PAYLOAD_SIZE: usize = 64 * 1024;
 
 /// Shared relay server state holding the peer registry and message store.
 pub struct RelayState {
@@ -29,6 +29,8 @@ pub struct RelayState {
     pub store: MessageStore,
     /// Room directory for room discovery and join request routing.
     pub rooms: RoomRegistry,
+    /// Maximum allowed payload size in bytes.
+    max_payload_size: usize,
 }
 
 impl Default for RelayState {
@@ -38,13 +40,26 @@ impl Default for RelayState {
 }
 
 impl RelayState {
-    /// Creates a new relay state with empty peer registry and message store.
+    /// Creates a new relay state with empty peer registry and message store,
+    /// using default payload and queue size limits.
     #[must_use]
     pub fn new() -> Self {
         Self {
             connections: RwLock::new(HashMap::new()),
             store: MessageStore::new(),
             rooms: RoomRegistry::new(),
+            max_payload_size: DEFAULT_MAX_PAYLOAD_SIZE,
+        }
+    }
+
+    /// Creates a new relay state with custom payload size limit and message store.
+    #[must_use]
+    pub fn with_config(max_payload_size: usize, store: MessageStore) -> Self {
+        Self {
+            connections: RwLock::new(HashMap::new()),
+            store,
+            rooms: RoomRegistry::new(),
+            max_payload_size,
         }
     }
 
@@ -238,17 +253,18 @@ async fn handle_binary_message(peer_id: &str, data: &[u8], state: &Arc<RelayStat
             payload,
         } => {
             // Enforce payload size limit (ext 7b).
-            if payload.len() > MAX_PAYLOAD_SIZE {
+            if payload.len() > state.max_payload_size {
                 tracing::warn!(
                     peer_id = %peer_id,
                     size = payload.len(),
-                    "payload exceeds 64KB limit"
+                    max = state.max_payload_size,
+                    "payload exceeds size limit"
                 );
                 let err = RelayMessage::Error {
                     reason: format!(
                         "payload too large: {} bytes (max {})",
                         payload.len(),
-                        MAX_PAYLOAD_SIZE
+                        state.max_payload_size
                     ),
                 };
                 send_to_peer(state, peer_id, &err).await;
@@ -483,7 +499,24 @@ pub async fn start_server(
     (std::net::SocketAddr, tokio::task::JoinHandle<()>),
     Box<dyn std::error::Error + Send + Sync>,
 > {
-    let state = Arc::new(RelayState::new());
+    start_server_with_state(addr, Arc::new(RelayState::new())).await
+}
+
+/// Starts the relay server with a pre-configured [`RelayState`].
+///
+/// Use [`RelayState::with_config`] to create a state with custom payload
+/// and queue size limits from the resolved [`crate::config::RelayConfig`].
+///
+/// # Errors
+///
+/// Returns an error if the TCP listener cannot bind to the given address.
+pub async fn start_server_with_state(
+    addr: &str,
+    state: Arc<RelayState>,
+) -> Result<
+    (std::net::SocketAddr, tokio::task::JoinHandle<()>),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
     let app = axum::Router::new()
         .route("/ws", axum::routing::get(ws_handler))
         .with_state(state);

@@ -49,7 +49,7 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &App) {
         .messages
         .iter()
         .map(|msg| {
-            let timestamp_style = theme::dimmed();
+            let timestamp_style = theme::timestamp();
             let status_style = theme::dimmed();
             let is_agent = msg.sender.starts_with("agent:");
 
@@ -58,7 +58,7 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &App) {
                 let name = msg.sender.strip_prefix("agent:").unwrap_or(&msg.sender);
                 (format!("[Agent] {name}"), theme::normal().fg(theme::AGENT))
             } else if msg.sender == "System" {
-                (msg.sender.clone(), theme::dimmed())
+                (msg.sender.clone(), theme::system_message())
             } else {
                 (
                     msg.sender.clone(),
@@ -67,7 +67,7 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &App) {
             };
 
             let content_style = if msg.sender == "System" {
-                theme::dimmed()
+                theme::system_message()
             } else {
                 theme::normal()
             };
@@ -88,6 +88,7 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &App) {
 
     let block = Block::default()
         .title("Chat")
+        .title_style(theme::panel_title(theme::CHAT_TITLE))
         .borders(Borders::ALL)
         .border_style(if is_focused {
             theme::highlighted()

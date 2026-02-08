@@ -21,6 +21,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
     let block = Block::default()
         .title("Tasks")
+        .title_style(theme::panel_title(theme::TASKS_TITLE))
         .borders(Borders::ALL)
         .border_style(border_style);
 

@@ -31,10 +31,10 @@ type WsReader =
     futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>>;
 
 /// Default timeout for connecting to the relay server.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Timeout for waiting for a `Registered` acknowledgment from the server.
-const REGISTER_TIMEOUT: Duration = Duration::from_secs(5);
+/// Default timeout for waiting for a `Registered` acknowledgment from the server.
+const DEFAULT_REGISTER_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// WebSocket relay transport implementing the [`Transport`] trait.
 ///
@@ -60,12 +60,30 @@ pub struct RelayTransport {
 }
 
 impl RelayTransport {
-    /// Connect to a relay server and register this peer.
+    /// Connect to a relay server and register this peer using default timeouts.
+    ///
+    /// This is a convenience wrapper around [`connect_with_timeouts`](Self::connect_with_timeouts)
+    /// that uses default connect (10s) and register (5s) timeouts.
+    ///
+    /// # Errors
+    ///
+    /// See [`connect_with_timeouts`](Self::connect_with_timeouts).
+    pub async fn connect(relay_url: &str, local_id: PeerId) -> Result<Self, TransportError> {
+        Self::connect_with_timeouts(
+            relay_url,
+            local_id,
+            DEFAULT_CONNECT_TIMEOUT,
+            DEFAULT_REGISTER_TIMEOUT,
+        )
+        .await
+    }
+
+    /// Connect to a relay server and register this peer with custom timeouts.
     ///
     /// Performs the following steps:
-    /// 1. Establishes a WebSocket connection to `relay_url` (10s timeout)
+    /// 1. Establishes a WebSocket connection to `relay_url`
     /// 2. Sends a `Register` message with the local `PeerId`
-    /// 3. Waits for a `Registered` acknowledgment (5s timeout)
+    /// 3. Waits for a `Registered` acknowledgment
     /// 4. Spawns a background task to read incoming messages
     ///
     /// # Errors
@@ -73,10 +91,15 @@ impl RelayTransport {
     /// - [`TransportError::Timeout`] if connection or registration times out.
     /// - [`TransportError::Unreachable`] if the relay URL cannot be resolved or connected.
     /// - [`TransportError::Io`] for TLS failures or registration rejection.
-    pub async fn connect(relay_url: &str, local_id: PeerId) -> Result<Self, TransportError> {
+    pub async fn connect_with_timeouts(
+        relay_url: &str,
+        local_id: PeerId,
+        connect_timeout: Duration,
+        register_timeout: Duration,
+    ) -> Result<Self, TransportError> {
         // Step 1: Connect to the relay WebSocket URL with a timeout.
         let (ws_stream, _response) =
-            tokio::time::timeout(CONNECT_TIMEOUT, connect_async(relay_url))
+            tokio::time::timeout(connect_timeout, connect_async(relay_url))
                 .await
                 .map_err(|_| {
                     tracing::warn!(url = relay_url, "relay WebSocket connect timed out");
@@ -107,7 +130,7 @@ impl RelayTransport {
             })?;
 
         // Step 4: Wait for Registered acknowledgment with timeout.
-        let ack = tokio::time::timeout(REGISTER_TIMEOUT, ws_reader.next())
+        let ack = tokio::time::timeout(register_timeout, ws_reader.next())
             .await
             .map_err(|_| {
                 tracing::warn!(

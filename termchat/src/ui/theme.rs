@@ -36,14 +36,29 @@ pub const PRESENCE_AWAY: Color = Color::Yellow;
 pub const PRESENCE_OFFLINE: Color = Color::DarkGray;
 
 /// Color for sender names in chat.
-pub const SENDER_COLORS: [Color; 6] = [
+pub const SENDER_COLORS: [Color; 12] = [
     Color::Cyan,
     Color::Green,
     Color::Yellow,
     Color::Magenta,
     Color::Blue,
     Color::LightCyan,
+    Color::LightGreen,
+    Color::LightYellow,
+    Color::LightBlue,
+    Color::LightRed,
+    Color::Rgb(255, 165, 0),
+    Color::Rgb(180, 120, 255),
 ];
+
+/// Panel title color for the chat panel.
+pub const CHAT_TITLE: Color = Color::Cyan;
+
+/// Panel title color for the sidebar panel.
+pub const SIDEBAR_TITLE: Color = Color::Blue;
+
+/// Panel title color for the tasks panel.
+pub const TASKS_TITLE: Color = Color::Green;
 
 /// Normal text style.
 #[must_use]
@@ -85,4 +100,47 @@ pub fn sender_color(name: &str) -> Color {
         acc.wrapping_mul(31).wrapping_add(u32::from(b))
     });
     SENDER_COLORS[(hash as usize) % SENDER_COLORS.len()]
+}
+
+/// Style for system messages (italic, dim blue).
+#[must_use]
+pub fn system_message() -> Style {
+    Style::default()
+        .fg(Color::Rgb(100, 140, 180))
+        .add_modifier(Modifier::ITALIC)
+}
+
+/// Style for timestamps (dark gray).
+#[must_use]
+pub fn timestamp() -> Style {
+    Style::default().fg(Color::Rgb(120, 120, 120))
+}
+
+/// Style for the input cursor (bright white, bold).
+#[must_use]
+pub fn input_cursor() -> Style {
+    Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Style for the status bar background (dark background with white foreground).
+#[must_use]
+pub fn status_bar_bg() -> Style {
+    Style::default().fg(Color::White).bg(Color::Rgb(30, 30, 50))
+}
+
+/// Style for panel titles with a given color (bold).
+#[must_use]
+pub fn panel_title(color: Color) -> Style {
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
+}
+
+/// Style for unread count badges (bold yellow on dark background).
+#[must_use]
+pub fn unread_badge() -> Style {
+    Style::default()
+        .fg(Color::Yellow)
+        .bg(Color::Rgb(30, 30, 50))
+        .add_modifier(Modifier::BOLD)
 }

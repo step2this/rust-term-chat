@@ -30,6 +30,6 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(help_text, theme::dimmed()),
     ]);
 
-    let paragraph = Paragraph::new(status_line);
+    let paragraph = Paragraph::new(status_line).style(theme::status_bar_bg());
     frame.render_widget(paragraph, area);
 }

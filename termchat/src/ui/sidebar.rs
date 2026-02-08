@@ -54,7 +54,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled(
                     format!("({})", conv.unread_count),
-                    theme::normal().fg(theme::WARNING),
+                    theme::unread_badge(),
                 ));
             }
 
@@ -85,6 +85,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
     let block = Block::default()
         .title("Conversations")
+        .title_style(theme::panel_title(theme::SIDEBAR_TITLE))
         .borders(Borders::ALL)
         .border_style(if is_focused {
             theme::highlighted()

@@ -6,15 +6,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project State
 
-Active development. Three-crate workspace is initialized and building. Completed: UC-001 (Send), UC-002 (Receive), UC-005 (E2E Handshake), UC-003 (P2P Connection), UC-004 (Relay Fallback), UC-006 (Create Room), UC-007 (Agent Join), UC-008 (Share Task List), UC-009 (Typing & Presence), Phase 1 (Hello Ratatui TUI). Phase 7 (Task Coordination) complete. Code quality sprint done: migrated bincode→postcard, eliminated all production unwrap/expect, fixed clippy pedantic.
+Active development. Three-crate workspace is initialized and building. Completed: UC-001 (Send), UC-002 (Receive), UC-005 (E2E Handshake), UC-003 (P2P Connection), UC-004 (Relay Fallback), UC-006 (Create Room), UC-007 (Agent Join), UC-008 (Share Task List), UC-009 (Typing & Presence), UC-010 (Live Relay Messaging), UC-012 (Polish for Ship), Phase 1 (Hello Ratatui TUI). Phase 7 (Task Coordination) complete. Sprint 8 (Polish & Ship) complete: clap CLI args, TOML config file, tracing-to-file logging, theme enhancement, GitHub Actions CI, package metadata.
 
 ## Build & Development Commands
 
 ```bash
 cargo build
-cargo run                                # launch TUI client
+cargo run                                # launch TUI client (offline demo mode)
+cargo run -- --help                      # show CLI options
+cargo run -- --relay-url ws://127.0.0.1:9000/ws --peer-id alice --remote-peer bob
 cargo run --bin termchat-relay           # relay server (ws://0.0.0.0:9000)
-cargo test                               # all tests (UC-008 + UC-009 merged)
+cargo run --bin termchat-relay -- --help # show relay CLI options
+cargo test                               # all tests
 cargo test --test send_receive           # UC-001/UC-002 integration test
 cargo test --test e2e_encryption         # UC-005 integration test
 cargo test --test p2p_connection         # UC-003 integration test
@@ -23,6 +26,7 @@ cargo test --test room_management        # UC-006 integration test
 cargo test --test task_sync              # UC-008 integration test
 cargo test --test agent_bridge           # UC-007 integration test
 cargo test --test presence_typing        # UC-009 integration test
+cargo test --test tui_net_wiring         # UC-010 integration test
 cargo test -p termchat-relay             # relay server unit tests
 cargo test --lib                         # unit tests only
 cargo test -p termchat-proto             # proto crate tests only
@@ -43,9 +47,11 @@ Four layers: TUI (ratatui + crossterm) -> Application (chat/task/agent managers)
 
 ```
 termchat/src/
-  main.rs          # TUI event loop (ratatui + crossterm)
-  lib.rs           # Crate root: pub mod agent, app, chat, crypto, tasks, transport, ui
+  main.rs          # TUI event loop (ratatui + crossterm), CLI args (clap), logging init
+  lib.rs           # Crate root: pub mod agent, app, chat, config, crypto, net, tasks, transport, ui
   app.rs           # App state, key event handling, panel focus, /task + /invite-agent commands
+  config/mod.rs    # TOML config file: CliArgs, ClientConfig, ChatConfig, layered resolution
+  net.rs           # Networking coordinator: NetCommand/NetEvent channels, spawn_net(), background tasks
   ui/              # TUI rendering (sidebar, chat_panel, task_panel, status_bar, theme)
   tasks/
     mod.rs         # TaskError enum, re-exports for merge + TaskManager
@@ -72,7 +78,8 @@ termchat/src/
     relay.rs       # RelayTransport (WebSocket relay client, UC-004)
 
 termchat-relay/src/
-  main.rs          # axum server entry point (configurable via RELAY_ADDR env)
+  main.rs          # axum server entry point, clap CLI args
+  config.rs        # TOML config file: RelayCliArgs, RelayConfig, layered resolution
   relay.rs         # RelayState, WebSocket handler, peer registry, message routing, room message dispatch
   rooms.rs         # RoomRegistry: in-memory room directory, join request routing
   store.rs         # MessageStore: per-peer FIFO queues (1000 cap, eviction)
@@ -145,3 +152,7 @@ Cockburn-style use cases in `docs/use-cases/`. Always check the relevant use cas
 - Git worktree (`git worktree add ../dir -b feature/uc-NNN`) enables parallel UC development without conflict risk — essential when two features touch overlapping files
 - Opaque envelope payloads (`Envelope::Feature(Vec<u8>)` with app-layer decode) scale indefinitely without bloating the wire format enum — standard pattern for domain-specific message types
 - Single-agent implementation is sufficient for medium-complexity UCs that follow established patterns; full Forge workflow (team, task-decompose) reserved for novel/high-complexity work
+- When parallel agents create overlapping module files (e.g., `config.rs` vs `config/mod.rs`), the Lead must resolve the conflict before quality gate — Rust panics on dual module paths
+- Add workspace dependencies to root Cargo.toml BEFORE spawning parallel agents — prevents Cargo.toml merge conflicts
+- `cargo clippy --fix --allow-dirty` handles most lint auto-fixes; `private_interfaces` lint requires manual visibility adjustment
+- Layered config (CLI > config file > env > defaults) via clap `env` attribute + `#[serde(default)]` TOML structs is a clean pattern with zero boilerplate
