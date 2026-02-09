@@ -10,11 +10,15 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use proptest::prelude::*;
+use termchat_proto::agent::{AgentCapability, AgentInfo};
 use termchat_proto::codec;
 use termchat_proto::message::*;
+use termchat_proto::presence::{PresenceMessage, PresenceStatus};
+use termchat_proto::relay::{self, RelayMessage};
 use termchat_proto::task::{
     self, LwwRegister, Task, TaskFieldUpdate, TaskId, TaskStatus, TaskSyncMessage,
 };
+use termchat_proto::typing::TypingMessage;
 use uuid::Uuid;
 
 // --- Arbitrary implementations for protocol types ---
@@ -282,5 +286,147 @@ proptest! {
     #[test]
     fn random_bytes_task_decode_no_panic(bytes in prop::collection::vec(any::<u8>(), 0..512)) {
         let _ = task::decode(&bytes);
+    }
+}
+
+// ==========================================================================
+// Agent, Presence, Typing, and Relay property tests
+// ==========================================================================
+
+/// Strategy for generating arbitrary `AgentCapability` values.
+fn arb_agent_capability() -> impl Strategy<Value = AgentCapability> {
+    prop_oneof![
+        Just(AgentCapability::Chat),
+        Just(AgentCapability::TaskManagement),
+        Just(AgentCapability::CodeReview),
+    ]
+}
+
+/// Strategy for generating arbitrary `AgentInfo` values.
+fn arb_agent_info() -> impl Strategy<Value = AgentInfo> {
+    (
+        "[a-z]{1,16}",
+        "[a-z]{1,16}",
+        prop::collection::vec(arb_agent_capability(), 0..4),
+    )
+        .prop_map(|(agent_id, display_name, capabilities)| AgentInfo {
+            agent_id,
+            display_name,
+            capabilities,
+        })
+}
+
+/// Strategy for generating arbitrary `PresenceStatus` values.
+fn arb_presence_status() -> impl Strategy<Value = PresenceStatus> {
+    prop_oneof![
+        Just(PresenceStatus::Online),
+        Just(PresenceStatus::Away),
+        Just(PresenceStatus::Offline),
+    ]
+}
+
+/// Strategy for generating arbitrary `PresenceMessage` values.
+fn arb_presence_message() -> impl Strategy<Value = PresenceMessage> {
+    ("[a-z]{1,16}", arb_presence_status(), any::<u64>()).prop_map(|(peer_id, status, timestamp)| {
+        PresenceMessage {
+            peer_id,
+            status,
+            timestamp,
+        }
+    })
+}
+
+/// Strategy for generating arbitrary `TypingMessage` values.
+fn arb_typing_message() -> impl Strategy<Value = TypingMessage> {
+    ("[a-z]{1,16}", "[a-z]{1,16}", any::<bool>()).prop_map(|(peer_id, room_id, is_typing)| {
+        TypingMessage {
+            peer_id,
+            room_id,
+            is_typing,
+        }
+    })
+}
+
+/// Strategy for generating arbitrary `RelayMessage` values.
+fn arb_relay_message() -> impl Strategy<Value = RelayMessage> {
+    prop_oneof![
+        "[a-z]{1,16}".prop_map(|peer_id| RelayMessage::Register { peer_id }),
+        "[a-z]{1,16}".prop_map(|peer_id| RelayMessage::Registered { peer_id }),
+        (
+            "[a-z]{1,16}",
+            "[a-z]{1,16}",
+            prop::collection::vec(any::<u8>(), 0..256),
+        )
+            .prop_map(|(from, to, payload)| RelayMessage::RelayPayload {
+                from,
+                to,
+                payload
+            }),
+        ("[a-z]{1,16}", any::<u32>()).prop_map(|(to, count)| RelayMessage::Queued { to, count }),
+        "[a-z]{1,16}".prop_map(|reason| RelayMessage::Error { reason }),
+        prop::collection::vec(any::<u8>(), 0..256).prop_map(RelayMessage::Room),
+    ]
+}
+
+proptest! {
+    /// Any valid `AgentInfo` survives a postcard encode -> decode round-trip.
+    #[test]
+    fn agent_info_postcard_round_trip(info in arb_agent_info()) {
+        let bytes = postcard::to_allocvec(&info).expect("encode should succeed");
+        let decoded: AgentInfo = postcard::from_bytes(&bytes).expect("decode should succeed");
+        prop_assert_eq!(info, decoded);
+    }
+
+    /// Any valid `AgentCapability` survives a postcard encode -> decode round-trip.
+    #[test]
+    fn agent_capability_postcard_round_trip(cap in arb_agent_capability()) {
+        let bytes = postcard::to_allocvec(&cap).expect("encode should succeed");
+        let decoded: AgentCapability = postcard::from_bytes(&bytes).expect("decode should succeed");
+        prop_assert_eq!(cap, decoded);
+    }
+
+    /// Any valid `PresenceStatus` survives a postcard encode -> decode round-trip.
+    #[test]
+    fn presence_status_postcard_round_trip(status in arb_presence_status()) {
+        let bytes = postcard::to_allocvec(&status).expect("encode should succeed");
+        let decoded: PresenceStatus = postcard::from_bytes(&bytes).expect("decode should succeed");
+        prop_assert_eq!(status, decoded);
+    }
+
+    /// Any valid `PresenceMessage` survives a postcard encode -> decode round-trip.
+    #[test]
+    fn presence_message_postcard_round_trip(msg in arb_presence_message()) {
+        let bytes = postcard::to_allocvec(&msg).expect("encode should succeed");
+        let decoded: PresenceMessage = postcard::from_bytes(&bytes).expect("decode should succeed");
+        prop_assert_eq!(msg, decoded);
+    }
+
+    /// Any valid `TypingMessage` survives a postcard encode -> decode round-trip.
+    #[test]
+    fn typing_message_postcard_round_trip(msg in arb_typing_message()) {
+        let bytes = postcard::to_allocvec(&msg).expect("encode should succeed");
+        let decoded: TypingMessage = postcard::from_bytes(&bytes).expect("decode should succeed");
+        prop_assert_eq!(msg, decoded);
+    }
+
+    /// Any valid `RelayMessage` survives an encode -> decode round-trip
+    /// through the relay module's encode/decode functions.
+    #[test]
+    fn relay_message_round_trip(msg in arb_relay_message()) {
+        let bytes = relay::encode(&msg).expect("encode should succeed");
+        let decoded = relay::decode(&bytes).expect("decode should succeed");
+        prop_assert_eq!(msg, decoded);
+    }
+
+    /// Random bytes never cause a panic when decoded as a `RelayMessage`.
+    #[test]
+    fn random_bytes_relay_decode_no_panic(bytes in prop::collection::vec(any::<u8>(), 0..512)) {
+        let _ = relay::decode(&bytes);
+    }
+
+    /// Random bytes never cause a panic when decoded as a `PresenceMessage`.
+    #[test]
+    fn random_bytes_presence_decode_no_panic(bytes in prop::collection::vec(any::<u8>(), 0..512)) {
+        let _ = postcard::from_bytes::<PresenceMessage>(&bytes);
     }
 }
