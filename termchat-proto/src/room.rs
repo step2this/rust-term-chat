@@ -50,7 +50,7 @@ pub enum RoomMessage {
         display_name: String,
     },
 
-    /// Admin approves a join request (sent to the joiner).
+    /// Admin approves a join request (sent to the joiner via relay).
     JoinApproved {
         /// The room that was joined.
         room_id: String,
@@ -58,14 +58,18 @@ pub enum RoomMessage {
         name: String,
         /// Current member list (including the newly approved member).
         members: Vec<MemberInfo>,
+        /// `PeerId` of the peer who requested to join (routing target).
+        target_peer_id: String,
     },
 
-    /// Admin denies a join request (sent to the joiner).
+    /// Admin denies a join request (sent to the joiner via relay).
     JoinDenied {
         /// The room that denied entry.
         room_id: String,
         /// Reason for denial.
         reason: String,
+        /// `PeerId` of the peer who requested to join (routing target).
+        target_peer_id: String,
     },
 
     /// Broadcast to all members when membership changes.
@@ -234,6 +238,7 @@ mod tests {
                     is_agent: false,
                 },
             ],
+            target_peer_id: "peer-bob".to_string(),
         };
         let bytes = encode(&msg).unwrap();
         let decoded = decode(&bytes).unwrap();
@@ -246,6 +251,7 @@ mod tests {
             room_id: "room-xyz".to_string(),
             name: "Empty Room".to_string(),
             members: vec![],
+            target_peer_id: "peer-someone".to_string(),
         };
         let bytes = encode(&msg).unwrap();
         let decoded = decode(&bytes).unwrap();
@@ -257,6 +263,7 @@ mod tests {
         let msg = RoomMessage::JoinDenied {
             room_id: "room-abc".to_string(),
             reason: "room full".to_string(),
+            target_peer_id: "peer-bob".to_string(),
         };
         let bytes = encode(&msg).unwrap();
         let decoded = decode(&bytes).unwrap();

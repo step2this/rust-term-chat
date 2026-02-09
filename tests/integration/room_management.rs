@@ -687,6 +687,152 @@ async fn offline_registration_skips_deleted_rooms() {
     assert!(messages.is_empty());
 }
 
+// =============================================================================
+// UC-016: JoinApproved/JoinDenied relay routing tests
+// =============================================================================
+
+/// Alice creates a room, Bob sends JoinRequest, Alice approves -> Bob receives
+/// JoinApproved with member list via the relay.
+#[tokio::test]
+async fn join_approved_reaches_requester_via_relay() {
+    let (addr, _handle) = start_relay().await;
+
+    // Alice registers a room
+    let mut ws_alice = connect_and_register(addr, "alice").await;
+    let register = RoomMessage::RegisterRoom {
+        room_id: "room-approve-test".to_string(),
+        name: "ApproveTest".to_string(),
+        admin_peer_id: "alice".to_string(),
+    };
+    send_room_msg(&mut ws_alice, &register).await;
+    let _ = recv_relay_msg(&mut ws_alice).await; // confirmation
+
+    // Bob connects and sends JoinRequest
+    let mut ws_bob = connect_and_register(addr, "bob").await;
+    let join_req = RoomMessage::JoinRequest {
+        room_id: "room-approve-test".to_string(),
+        peer_id: "bob".to_string(),
+        display_name: "Bob".to_string(),
+    };
+    send_room_msg(&mut ws_bob, &join_req).await;
+
+    // Alice receives JoinRequest
+    let request = recv_relay_msg(&mut ws_alice).await;
+    let request_msg = unwrap_room_msg(request);
+    assert_eq!(
+        request_msg,
+        RoomMessage::JoinRequest {
+            room_id: "room-approve-test".to_string(),
+            peer_id: "bob".to_string(),
+            display_name: "Bob".to_string(),
+        }
+    );
+
+    // Alice approves: sends JoinApproved with target_peer_id = "bob"
+    let approve = RoomMessage::JoinApproved {
+        room_id: "room-approve-test".to_string(),
+        name: "ApproveTest".to_string(),
+        members: vec![
+            room::MemberInfo {
+                peer_id: "alice".to_string(),
+                display_name: "Alice".to_string(),
+                is_admin: true,
+                is_agent: false,
+            },
+            room::MemberInfo {
+                peer_id: "bob".to_string(),
+                display_name: "Bob".to_string(),
+                is_admin: false,
+                is_agent: false,
+            },
+        ],
+        target_peer_id: "bob".to_string(),
+    };
+    send_room_msg(&mut ws_alice, &approve).await;
+
+    // Bob receives the JoinApproved
+    let response = recv_relay_msg(&mut ws_bob).await;
+    let room_msg = unwrap_room_msg(response);
+    match room_msg {
+        RoomMessage::JoinApproved {
+            room_id,
+            name,
+            members,
+            target_peer_id,
+        } => {
+            assert_eq!(room_id, "room-approve-test");
+            assert_eq!(name, "ApproveTest");
+            assert_eq!(target_peer_id, "bob");
+            assert_eq!(members.len(), 2);
+            assert!(members.iter().any(|m| m.peer_id == "alice" && m.is_admin));
+            assert!(members.iter().any(|m| m.peer_id == "bob" && !m.is_admin));
+        }
+        other => panic!("expected JoinApproved, got {other:?}"),
+    }
+}
+
+/// Alice creates a room, Bob sends JoinRequest, Alice denies -> Bob receives
+/// JoinDenied with reason via the relay.
+#[tokio::test]
+async fn join_denied_reaches_requester_via_relay() {
+    let (addr, _handle) = start_relay().await;
+
+    // Alice registers a room
+    let mut ws_alice = connect_and_register(addr, "alice").await;
+    let register = RoomMessage::RegisterRoom {
+        room_id: "room-deny-test".to_string(),
+        name: "DenyTest".to_string(),
+        admin_peer_id: "alice".to_string(),
+    };
+    send_room_msg(&mut ws_alice, &register).await;
+    let _ = recv_relay_msg(&mut ws_alice).await; // confirmation
+
+    // Bob connects and sends JoinRequest
+    let mut ws_bob = connect_and_register(addr, "bob").await;
+    let join_req = RoomMessage::JoinRequest {
+        room_id: "room-deny-test".to_string(),
+        peer_id: "bob".to_string(),
+        display_name: "Bob".to_string(),
+    };
+    send_room_msg(&mut ws_bob, &join_req).await;
+
+    // Alice receives JoinRequest
+    let request = recv_relay_msg(&mut ws_alice).await;
+    let request_msg = unwrap_room_msg(request);
+    assert_eq!(
+        request_msg,
+        RoomMessage::JoinRequest {
+            room_id: "room-deny-test".to_string(),
+            peer_id: "bob".to_string(),
+            display_name: "Bob".to_string(),
+        }
+    );
+
+    // Alice denies: sends JoinDenied with target_peer_id = "bob"
+    let deny = RoomMessage::JoinDenied {
+        room_id: "room-deny-test".to_string(),
+        reason: "room is invite-only".to_string(),
+        target_peer_id: "bob".to_string(),
+    };
+    send_room_msg(&mut ws_alice, &deny).await;
+
+    // Bob receives the JoinDenied
+    let response = recv_relay_msg(&mut ws_bob).await;
+    let room_msg = unwrap_room_msg(response);
+    match room_msg {
+        RoomMessage::JoinDenied {
+            room_id,
+            reason,
+            target_peer_id,
+        } => {
+            assert_eq!(room_id, "room-deny-test");
+            assert_eq!(reason, "room is invite-only");
+            assert_eq!(target_peer_id, "bob");
+        }
+        other => panic!("expected JoinDenied, got {other:?}"),
+    }
+}
+
 /// Room list from relay shows multiple rooms from different clients.
 #[tokio::test]
 async fn room_discovery_across_clients() {

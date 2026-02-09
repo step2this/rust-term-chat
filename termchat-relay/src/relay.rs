@@ -404,31 +404,87 @@ async fn handle_room_message(peer_id: &str, room_bytes: &[u8], state: &Arc<Relay
                 send_to_peer(state, peer_id, &err).await;
             }
         }
-        room::RoomMessage::JoinApproved { ref room_id, .. } => {
-            // Forward to the peer who requested to join.
-            // The target peer_id needs to be inferred; for JoinApproved, the
-            // admin sends it and the relay must know who to route it to.
-            // The relay routes based on the room message content: JoinApproved
-            // is sent by the admin to a specific peer. We look at the member
-            // list to find non-admin members, but a cleaner approach is to
-            // just forward it. The calling client should send it via
-            // RelayPayload for targeted delivery. For now, log it.
-            tracing::debug!(
+        room::RoomMessage::JoinApproved {
+            ref room_id,
+            ref target_peer_id,
+            ..
+        } => {
+            tracing::info!(
                 peer_id = %peer_id,
                 room_id = %room_id,
-                "received JoinApproved — should be sent via RelayPayload for targeted delivery"
+                target = %target_peer_id,
+                "routing JoinApproved to target peer"
             );
+            let target = target_peer_id.clone();
+            route_room_to_peer(state, peer_id, &target, &room_msg).await;
         }
-        room::RoomMessage::JoinDenied { ref room_id, .. } => {
-            tracing::debug!(
+        room::RoomMessage::JoinDenied {
+            ref room_id,
+            ref target_peer_id,
+            ..
+        } => {
+            tracing::info!(
                 peer_id = %peer_id,
                 room_id = %room_id,
-                "received JoinDenied — should be sent via RelayPayload for targeted delivery"
+                target = %target_peer_id,
+                "routing JoinDenied to target peer"
             );
+            let target = target_peer_id.clone();
+            route_room_to_peer(state, peer_id, &target, &room_msg).await;
         }
         room::RoomMessage::MembershipUpdate { .. } | room::RoomMessage::RoomList { .. } => {
             // Client-to-client or server-to-client only; no relay action needed.
         }
+    }
+}
+
+/// Routes a room message to a target peer, queuing it if the peer is offline.
+///
+/// On encoding failure, sends a `RelayMessage::Error` back to the sender.
+async fn route_room_to_peer(
+    state: &Arc<RelayState>,
+    sender_peer_id: &str,
+    target_peer_id: &str,
+    room_msg: &room::RoomMessage,
+) {
+    let room_bytes = match room::encode(room_msg) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to encode room message for routing");
+            let err = RelayMessage::Error {
+                reason: format!("room message encoding failed: {e}"),
+            };
+            send_to_peer(state, sender_peer_id, &err).await;
+            return;
+        }
+    };
+    let relay_msg = RelayMessage::Room(room_bytes.clone());
+
+    if let Some(sender) = state.get_sender(target_peer_id).await {
+        if let Ok(bytes) = relay::encode(&relay_msg)
+            && sender.send(Message::Binary(bytes.into())).is_err()
+        {
+            // Send failed, queue for later delivery.
+            tracing::warn!(
+                target = %target_peer_id,
+                "forward room message failed, queuing"
+            );
+            state.unregister(target_peer_id).await;
+            state
+                .store
+                .enqueue(target_peer_id, sender_peer_id, room_bytes)
+                .await;
+        }
+    } else {
+        // Target peer is offline — queue the encoded room message bytes.
+        state
+            .store
+            .enqueue(target_peer_id, sender_peer_id, room_bytes)
+            .await;
+        tracing::info!(
+            target = %target_peer_id,
+            "target peer offline, room message queued"
+        );
     }
 }
 
