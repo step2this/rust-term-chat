@@ -4,19 +4,20 @@
 //! (validate -> serialize -> encrypt -> transmit), delivery acknowledgment
 //! flow, message status tracking, and local history persistence.
 
+pub mod ack;
 pub mod history;
+pub mod receive;
 pub mod room;
+pub mod send;
+
+pub use ack::RetryConfig;
 
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
 
 use tokio::sync::{Mutex, mpsc};
 
 use termchat_proto::codec;
-use termchat_proto::message::{
-    ChatMessage, ConversationId, DeliveryAck, Envelope, MessageContent, MessageId, MessageMetadata,
-    MessageStatus, Nack, NackReason, SenderId, Timestamp,
-};
+use termchat_proto::message::{ChatMessage, Envelope, MessageId, MessageStatus, SenderId};
 
 use crate::config::ChatConfig;
 use crate::crypto::{CryptoError, CryptoSession};
@@ -55,27 +56,6 @@ pub enum SendError {
         /// Maximum allowed size.
         max: usize,
     },
-}
-
-/// Configuration for send retry and ack timeout behavior.
-#[derive(Debug, Clone)]
-pub struct RetryConfig {
-    /// Number of times to retry a failed send before giving up.
-    pub send_retries: u32,
-    /// How long to wait for a delivery ack before timing out.
-    pub ack_timeout: Duration,
-    /// Number of times to retry after an ack timeout.
-    pub ack_retries: u32,
-}
-
-impl Default for RetryConfig {
-    fn default() -> Self {
-        Self {
-            send_retries: 1,
-            ack_timeout: Duration::from_secs(10),
-            ack_retries: 1,
-        }
-    }
 }
 
 /// Events emitted by the [`ChatManager`] for UI notification.
@@ -244,381 +224,6 @@ impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
         (manager, event_rx, warning_rx)
     }
 
-    /// Send a message through the full pipeline.
-    ///
-    /// Pipeline steps (MSS 2-6):
-    /// 1. Build [`ChatMessage`] with metadata (ID, timestamp, sender, conversation)
-    /// 2. Validate the message (non-empty, within size limit)
-    /// 3. Serialize via [`codec::encode`]
-    /// 4. Encrypt via [`CryptoSession::encrypt`]
-    /// 5. Transmit via [`Transport::send`]
-    /// 6. Save to history (if configured)
-    ///
-    /// The message status is tracked internally and updated when an ack
-    /// arrives via [`receive_one`](Self::receive_one).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SendError`] if any pipeline step fails. History write
-    /// failures do not cause a send error (handled resiliently).
-    pub async fn send_message(
-        &self,
-        content: MessageContent,
-        conversation: ConversationId,
-    ) -> Result<(MessageId, MessageStatus), SendError> {
-        // Step 1: Build the ChatMessage with metadata
-        let message_id = MessageId::new();
-        let message = ChatMessage {
-            metadata: MessageMetadata {
-                message_id: message_id.clone(),
-                timestamp: Timestamp::now(),
-                sender_id: self.sender_id.clone(),
-                conversation_id: conversation,
-            },
-            content,
-        };
-
-        // Step 2: Validate
-        message.validate()?;
-
-        // Step 3: Serialize
-        let envelope = Envelope::Chat(message.clone());
-        let serialized = codec::encode(&envelope)?;
-
-        // Step 4: Encrypt (Invariant 1: plaintext never leaves app boundary)
-        let encrypted = self.crypto.encrypt(&serialized)?;
-
-        // Step 5: Transmit
-        self.transport.send(&self.peer_id, &encrypted).await?;
-
-        // Track status
-        let status = MessageStatus::Sent;
-        self.statuses
-            .lock()
-            .await
-            .insert(message_id.clone(), status.clone());
-
-        // Step 6: Save to history (resilient -- never fails the send)
-        if let Some(ref history) = self.history {
-            history.save(&message, status.clone()).await;
-        }
-
-        // Notify UI
-        let _ = self.event_tx.try_send(ChatEvent::StatusChanged {
-            message_id: message_id.clone(),
-            status: status.clone(),
-        });
-
-        Ok((message_id, status))
-    }
-
-    /// Send a message with transport-level retry on failure (Extension 6a).
-    ///
-    /// If the initial send fails, retries up to `config.send_retries` times
-    /// on the same transport before returning an error.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SendError`] if all retry attempts fail.
-    pub async fn send_message_with_retry(
-        &self,
-        content: MessageContent,
-        conversation: ConversationId,
-        config: &RetryConfig,
-    ) -> Result<(MessageId, MessageStatus), SendError> {
-        let mut last_err = None;
-
-        for attempt in 0..=config.send_retries {
-            match self
-                .send_message(content.clone(), conversation.clone())
-                .await
-            {
-                Ok(result) => return Ok(result),
-                Err(SendError::Transport(e)) => {
-                    tracing::debug!(
-                        attempt,
-                        max_retries = config.send_retries,
-                        error = %e,
-                        "send failed, will retry"
-                    );
-                    last_err = Some(SendError::Transport(e));
-                }
-                Err(e) => return Err(e), // Non-transport errors are not retryable
-            }
-        }
-
-        Err(last_err.unwrap_or_else(|| unreachable!("loop ran at least once")))
-    }
-
-    /// Wait for a delivery ack for a specific message, with timeout (Extension 7a).
-    ///
-    /// Calls [`receive_one`](Self::receive_one) in a loop until either:
-    /// - A matching ack arrives (returns `MessageStatus::Delivered`)
-    /// - The timeout expires (returns `MessageStatus::Sent`)
-    ///
-    /// If the first attempt times out, retries up to `config.ack_retries` times.
-    /// Non-ack envelopes received during the wait are still processed normally.
-    pub async fn await_ack(&self, message_id: &MessageId, config: &RetryConfig) -> MessageStatus {
-        for attempt in 0..=config.ack_retries {
-            match tokio::time::timeout(config.ack_timeout, self.wait_for_ack(message_id)).await {
-                Ok(Ok(())) => return MessageStatus::Delivered,
-                Ok(Err(_)) => {
-                    // Transport/decode error during receive -- treat as timeout
-                    tracing::debug!(attempt, "error while waiting for ack, treating as timeout");
-                }
-                Err(_) => {
-                    tracing::debug!(
-                        attempt,
-                        max_retries = config.ack_retries,
-                        "ack timeout expired"
-                    );
-                }
-            }
-        }
-
-        // All retries exhausted -- mark as Sent (not Delivered)
-        tracing::info!(
-            message_id = %message_id,
-            "no ack received after retries, status remains Sent"
-        );
-        MessageStatus::Sent
-    }
-
-    /// Internal: keep receiving envelopes until we get an ack for the given message.
-    async fn wait_for_ack(&self, target_id: &MessageId) -> Result<(), SendError> {
-        loop {
-            let envelope = self.receive_one().await?;
-            if let Envelope::Ack(ack) = &envelope
-                && ack.message_id == *target_id
-            {
-                return Ok(());
-            }
-            // Non-matching envelopes are already processed by receive_one
-        }
-    }
-
-    /// Receive and process one incoming envelope from the transport.
-    ///
-    /// Handles the following cases:
-    /// - **Chat message**: Validates, decrypts, deserializes, checks for duplicates,
-    ///   stores in history, and automatically sends back a [`DeliveryAck`].
-    ///   Emits a [`ChatEvent::MessageReceived`].
-    /// - **Delivery ack**: Updates the tracked status from `Sent` to
-    ///   `Delivered`. Updates history if configured. Emits a
-    ///   [`ChatEvent::StatusChanged`].
-    /// - **Nack**: Logs the negative acknowledgment (UC-002 Extension 5a).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SendError`] if transport receive, decryption, or
-    /// deserialization fails. Validation failures on the receive side
-    /// result in the message being dropped silently or a NACK being sent.
-    #[allow(clippy::too_many_lines)]
-    pub async fn receive_one(&self) -> Result<Envelope, SendError> {
-        // Extension 1a: Check payload size before decryption
-        let (from, encrypted) = self.transport.recv().await?;
-        if encrypted.len() > self.chat_config.max_payload_size {
-            tracing::warn!(
-                peer = %from,
-                size = encrypted.len(),
-                "dropping oversized payload from peer"
-            );
-            return Err(SendError::OversizedPayload {
-                size: encrypted.len(),
-                max: self.chat_config.max_payload_size,
-            });
-        }
-
-        // Step 4: Decrypt (Extension 4a handled by crypto layer)
-        let decrypted = self.crypto.decrypt(&encrypted)?;
-
-        // Step 5: Deserialize (Extension 5a)
-        let envelope = match codec::decode(&decrypted) {
-            Ok(env) => env,
-            Err(e) => {
-                tracing::warn!(peer = %from, error = %e, "deserialization failed, sending NACK");
-                // Send NACK for deserialization failure
-                // We can't extract a message ID since deserialization failed, so use a dummy
-                let nack = Nack {
-                    message_id: MessageId::new(),
-                    reason: NackReason::DeserializationFailed,
-                };
-                let _ = self.send_envelope(&Envelope::Nack(nack), &from).await;
-                return Err(SendError::Codec(e));
-            }
-        };
-
-        match &envelope {
-            Envelope::Chat(msg) => {
-                // Duplicate detection (Invariant 3)
-                let msg_id = msg.metadata.message_id.clone();
-                {
-                    let mut seen = self.seen_message_ids.lock().await;
-                    if seen.contains(&msg_id) {
-                        tracing::debug!(message_id = %msg_id, "duplicate message dropped");
-                        return Ok(envelope);
-                    }
-                    // Track this message ID
-                    if seen.len() >= self.chat_config.max_duplicate_tracking {
-                        // Simple eviction: clear half the set
-                        seen.clear();
-                    }
-                    seen.insert(msg_id.clone());
-                }
-
-                // Step 6: Validate metadata
-                // Extension 6c: Check sender ID matches transport peer
-                if !self.sender_id_matches_peer(&msg.metadata.sender_id, &from) {
-                    tracing::warn!(
-                        peer = %from,
-                        claimed_sender = %msg.metadata.sender_id,
-                        "sender ID mismatch, rejecting message"
-                    );
-                    let nack = Nack {
-                        message_id: msg_id.clone(),
-                        reason: NackReason::SenderIdMismatch,
-                    };
-                    let _ = self.send_envelope(&Envelope::Nack(nack), &from).await;
-                    return Err(SendError::ReceiveValidation(
-                        "sender ID does not match authenticated peer".into(),
-                    ));
-                }
-
-                // Extension 6a: Check timestamp for clock skew
-                let has_clock_skew = self.check_timestamp_skew(msg.metadata.timestamp);
-
-                // Step 7: Store in history (Extension 7a handled by ResilientHistoryWriter)
-                if let Some(ref history) = self.history {
-                    history.save(msg, MessageStatus::Delivered).await;
-                }
-
-                // Step 8: Send delivery acknowledgment (Extension 8a: queue on failure)
-                let ack = DeliveryAck {
-                    message_id: msg_id.clone(),
-                    timestamp: Timestamp::now(),
-                };
-                if let Err(e) = self.send_envelope(&Envelope::Ack(ack), &from).await {
-                    tracing::warn!(
-                        message_id = %msg_id,
-                        error = %e,
-                        "failed to send ack, queueing for retry"
-                    );
-                    self.pending_acks
-                        .lock()
-                        .await
-                        .push((msg_id.clone(), from.clone()));
-                }
-
-                // Step 9: Emit event to UI
-                if has_clock_skew {
-                    let _ = self
-                        .event_tx
-                        .try_send(ChatEvent::MessageReceivedWithClockSkew {
-                            message: msg.clone(),
-                            from: from.clone(),
-                            skew_description: "timestamp outside acceptable range".into(),
-                        });
-                } else {
-                    let _ = self.event_tx.try_send(ChatEvent::MessageReceived {
-                        message: msg.clone(),
-                        from: from.clone(),
-                    });
-                }
-            }
-            Envelope::Ack(ack) => {
-                // Update tracked status
-                let mut statuses = self.statuses.lock().await;
-                if let Some(status) = statuses.get_mut(&ack.message_id) {
-                    *status = MessageStatus::Delivered;
-                }
-                drop(statuses);
-
-                // Update history
-                if let Some(ref history) = self.history {
-                    history
-                        .update_status(&ack.message_id, MessageStatus::Delivered)
-                        .await;
-                }
-
-                // Notify UI of status change
-                let _ = self.event_tx.try_send(ChatEvent::StatusChanged {
-                    message_id: ack.message_id.clone(),
-                    status: MessageStatus::Delivered,
-                });
-            }
-            Envelope::Nack(nack) => {
-                // Log the NACK (Extension 5a)
-                tracing::warn!(
-                    message_id = %nack.message_id,
-                    reason = ?nack.reason,
-                    "received NACK from peer"
-                );
-                // For now, just log. Future work: update message status to Failed.
-            }
-            Envelope::Handshake(_) | Envelope::TaskSync(_) => {
-                // Handshake: handled by the crypto layer (UC-005).
-                // TaskSync: handled by the tasks module (UC-008).
-            }
-            Envelope::PresenceUpdate(data) => {
-                // Decode presence message and emit event to UI
-                if let Ok(presence_msg) =
-                    postcard::from_bytes::<termchat_proto::presence::PresenceMessage>(data)
-                {
-                    let _ = self.event_tx.try_send(ChatEvent::PresenceChanged {
-                        peer_id: presence_msg.peer_id,
-                        status: presence_msg.status,
-                    });
-                } else {
-                    tracing::warn!(peer = %from, "failed to decode presence message");
-                }
-            }
-            Envelope::TypingIndicator(data) => {
-                // Decode typing message and emit event to UI
-                if let Ok(typing_msg) =
-                    postcard::from_bytes::<termchat_proto::typing::TypingMessage>(data)
-                {
-                    let _ = self.event_tx.try_send(ChatEvent::TypingChanged {
-                        peer_id: typing_msg.peer_id,
-                        room_id: typing_msg.room_id,
-                        is_typing: typing_msg.is_typing,
-                    });
-                } else {
-                    tracing::warn!(peer = %from, "failed to decode typing message");
-                }
-            }
-        }
-
-        Ok(envelope)
-    }
-
-    /// Check if the sender ID matches the authenticated peer.
-    ///
-    /// For now, this is a simple comparison. In the real system with Noise,
-    /// the peer ID would be derived from the Noise static public key and
-    /// the sender ID would be the key fingerprint, so they should match.
-    #[allow(clippy::unused_self)]
-    const fn sender_id_matches_peer(&self, sender_id: &SenderId, peer: &PeerId) -> bool {
-        // Placeholder: assume match for now. Real implementation would
-        // compare the sender_id bytes with the peer's identity key fingerprint.
-        // For testing with stub crypto, we skip validation.
-        let _ = (sender_id, peer);
-        true
-    }
-
-    /// Check if the timestamp is within acceptable clock skew tolerance.
-    ///
-    /// Returns `true` if the timestamp is outside the acceptable range.
-    #[allow(clippy::unused_self)]
-    fn check_timestamp_skew(&self, timestamp: Timestamp) -> bool {
-        let now = Timestamp::now();
-        let diff = if timestamp.as_millis() > now.as_millis() {
-            timestamp.as_millis() - now.as_millis()
-        } else {
-            now.as_millis() - timestamp.as_millis()
-        };
-        diff > self.chat_config.clock_skew_tolerance_ms
-    }
-
     /// Get the current status of a sent message.
     pub async fn get_status(&self, message_id: &MessageId) -> Option<MessageStatus> {
         self.statuses.lock().await.get(message_id).cloned()
@@ -642,36 +247,6 @@ impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
         self.history.as_ref()
     }
 
-    /// Send a presence update to the connected peer.
-    ///
-    /// Presence messages are fire-and-forget: no ack is expected, and send
-    /// failures are logged but do not propagate errors.
-    pub async fn send_presence(&self, presence: &termchat_proto::presence::PresenceMessage) {
-        let Ok(data) = postcard::to_allocvec(presence) else {
-            tracing::warn!("failed to serialize presence message");
-            return;
-        };
-        let envelope = Envelope::PresenceUpdate(data);
-        if let Err(e) = self.send_envelope(&envelope, &self.peer_id).await {
-            tracing::debug!(error = %e, "failed to send presence update (fire-and-forget)");
-        }
-    }
-
-    /// Send a typing indicator to the connected peer.
-    ///
-    /// Typing indicators are fire-and-forget: no ack is expected, and send
-    /// failures are logged but do not propagate errors.
-    pub async fn send_typing(&self, typing: &termchat_proto::typing::TypingMessage) {
-        let Ok(data) = postcard::to_allocvec(typing) else {
-            tracing::warn!("failed to serialize typing message");
-            return;
-        };
-        let envelope = Envelope::TypingIndicator(data);
-        if let Err(e) = self.send_envelope(&envelope, &self.peer_id).await {
-            tracing::debug!(error = %e, "failed to send typing indicator (fire-and-forget)");
-        }
-    }
-
     /// Internal: encrypt, serialize, and send an envelope to a peer.
     async fn send_envelope(&self, envelope: &Envelope, peer: &PeerId) -> Result<(), SendError> {
         let serialized = codec::encode(envelope)?;
@@ -683,6 +258,10 @@ impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use termchat_proto::message::{ConversationId, Envelope, MessageContent};
+
     use super::*;
     use crate::crypto::noise::StubNoiseSession;
     use crate::transport::loopback::LoopbackTransport;
