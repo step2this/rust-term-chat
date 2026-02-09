@@ -289,7 +289,8 @@ fn app_set_peer_presence_updates_map() {
 #[test]
 fn app_set_peer_presence_updates_dm_conversation() {
     let mut app = App::new();
-    // App::new() has a "@ Alice" conversation with Online presence
+    // Set up "@ Alice" conversation with Online presence
+    app.add_conversation("@ Alice", Some(PresenceStatus::Online));
 
     app.set_peer_presence("Alice", PresenceStatus::Away);
 
@@ -333,10 +334,14 @@ fn app_set_peer_typing_multiple_peers() {
 
 #[test]
 fn app_current_typing_peers_returns_correct_list() {
-    let app = App::new();
-    // App::new() starts with "# general" selected (index 0)
+    let mut app = App::new();
+    // Set up "# general" conversation and select it
+    app.add_conversation("# general", None);
+    app.selected_conversation = 0;
 
-    // The demo data already has Alice typing in general
+    // Set Alice as typing in general (room_id is "general" without the "# " prefix)
+    app.set_peer_typing("general", "Alice", true);
+
     let peers = app.current_typing_peers();
     assert_eq!(peers.len(), 1);
     assert!(peers.contains(&"Alice"));

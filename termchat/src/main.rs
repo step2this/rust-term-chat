@@ -21,7 +21,7 @@ use std::path::Path;
 
 use clap::Parser;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{self, Event, KeyEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -29,10 +29,11 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 use tracing_appender::non_blocking::WorkerGuard;
 
-use termchat::app::{App, DisplayMessage, MessageStatus, PanelFocus};
+use termchat::app::{App, DisplayMessage, MessageStatus};
 use termchat::config::{CliArgs, ClientConfig};
 use termchat::net::{self, NetCommand, NetConfig, NetEvent};
 use termchat::ui;
+use termchat_proto::presence::PresenceStatus;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -113,18 +114,26 @@ async fn run_app(
 
     // Attempt to connect to the relay if config is provided.
     let (cmd_tx, mut evt_rx) = match net_config {
-        Some(config) => match net::spawn_net(config).await {
-            Ok((tx, rx)) => {
-                app.push_system_message("Connected via Relay".to_string());
-                (Some(tx), Some(rx))
+        Some(ref config) => {
+            // Pre-create DM conversation from --remote-peer arg.
+            let remote = &config.remote_peer_id;
+            if !remote.is_empty() {
+                app.add_conversation(&format!("@ {remote}"), None);
             }
-            Err(e) => {
-                app.push_system_message(format!(
-                    "Could not connect to relay — running in offline mode ({e})"
-                ));
-                (None, None)
+            match net::spawn_net(config.clone()).await {
+                Ok((tx, rx)) => {
+                    app.set_connection_status(true, "Relay");
+                    app.push_system_message("Connected via Relay".to_string());
+                    (Some(tx), Some(rx))
+                }
+                Err(e) => {
+                    app.push_system_message(format!(
+                        "Could not connect to relay — running in offline mode ({e})"
+                    ));
+                    (None, None)
+                }
             }
-        },
+        }
         None => (None, None),
     };
 
@@ -148,19 +157,26 @@ async fn run_app(
                 continue;
             }
 
-            // Intercept Enter on non-slash input to send via network.
-            if key.code == KeyCode::Enter
-                && key.modifiers == KeyModifiers::NONE
-                && app.focus == PanelFocus::Input
-                && !app.input.trim().is_empty()
-                && !app.input.trim().starts_with('/')
+            // handle_key_event returns Some(NetCommand) when user action
+            // requires network dispatch (e.g., sending a message, slash
+            // commands like /create-room, /join-room, /approve, /deny).
+            if let Some(net_cmd) = app.handle_key_event(key)
                 && let Some(ref tx) = cmd_tx
             {
-                let input_clone = app.input.clone();
-                send_message_command(tx, &input_clone, &mut app);
+                if app.can_send() {
+                    match tx.try_send(net_cmd) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            app.push_system_message("Message queued, network busy".to_string());
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            app.push_system_message("Network disconnected".to_string());
+                        }
+                    }
+                } else {
+                    app.push_system_message("Not connected \u{2014} command not sent".to_string());
+                }
             }
-
-            app.handle_key_event(key);
         }
 
         if app.should_quit {
@@ -173,27 +189,8 @@ async fn run_app(
     }
 }
 
-/// Send a message command to the networking layer.
-///
-/// Uses `try_send` to avoid blocking. If the channel is full (back-pressure),
-/// shows a system message to the user (Extension 7a).
-fn send_message_command(tx: &mpsc::Sender<NetCommand>, input: &str, app: &mut App) {
-    let text = input.trim().to_string();
-    match tx.try_send(NetCommand::SendMessage { text }) {
-        Ok(()) => {
-            // Message will be sent by the background task.
-            // app.handle_key_event(Enter) will add it to local display.
-        }
-        Err(mpsc::error::TrySendError::Full(_)) => {
-            app.push_system_message("Message queued, network busy".to_string());
-        }
-        Err(mpsc::error::TrySendError::Closed(_)) => {
-            app.push_system_message("Network disconnected".to_string());
-        }
-    }
-}
-
 /// Drain all pending `NetEvent`s from the receiver and apply them to the app.
+#[allow(clippy::too_many_lines)]
 fn drain_net_events(app: &mut App, rx: &mut mpsc::Receiver<NetEvent>) {
     while let Ok(event) = rx.try_recv() {
         match event {
@@ -204,31 +201,40 @@ fn drain_net_events(app: &mut App, rx: &mut mpsc::Receiver<NetEvent>) {
             } => {
                 // Convert epoch ms to HH:MM display format.
                 let timestamp = format_timestamp_ms(timestamp_ms);
-                app.messages.push(DisplayMessage {
-                    sender,
-                    content,
-                    timestamp,
-                    status: MessageStatus::Delivered,
-                });
-                // Auto-scroll to bottom.
-                app.message_scroll = app.messages.len().saturating_sub(1);
+                let conversation = format!("@ {sender}");
+                app.push_message(
+                    &conversation,
+                    DisplayMessage {
+                        sender,
+                        content,
+                        timestamp,
+                        status: MessageStatus::Delivered,
+                        message_id: None,
+                    },
+                );
+                // Auto-scroll to bottom of current conversation.
+                app.message_scroll = app.current_messages().len().saturating_sub(1);
             }
             NetEvent::StatusChanged { delivered, .. } => {
-                // Find the most recent "You" message with Sent status and update it.
-                if delivered
-                    && let Some(msg) = app
-                        .messages
-                        .iter_mut()
-                        .rev()
-                        .find(|m| m.sender == "You" && m.status == MessageStatus::Sent)
-                {
-                    msg.status = MessageStatus::Delivered;
+                // Find the most recent "You" message with Sending status and update it.
+                if delivered {
+                    for msgs in app.messages.values_mut() {
+                        if let Some(msg) = msgs
+                            .iter_mut()
+                            .rev()
+                            .find(|m| m.sender == "You" && m.status == MessageStatus::Sending)
+                        {
+                            msg.status = MessageStatus::Delivered;
+                            break;
+                        }
+                    }
                 }
             }
             NetEvent::ConnectionStatus {
                 connected,
                 transport_type,
             } => {
+                app.set_connection_status(connected, &transport_type);
                 if connected {
                     app.push_system_message(format!("Connected via {transport_type}"));
                 } else {
@@ -239,17 +245,64 @@ fn drain_net_events(app: &mut App, rx: &mut mpsc::Receiver<NetEvent>) {
                 attempt,
                 max_attempts,
             } => {
+                app.set_connection_status(false, "Reconnecting");
                 app.push_system_message(format!(
                     "Reconnecting... (attempt {attempt}/{max_attempts})"
                 ));
             }
             NetEvent::ReconnectFailed => {
+                app.set_connection_status(false, "");
                 app.push_system_message(
                     "Reconnection failed — will retry in background".to_string(),
                 );
             }
             NetEvent::Error(msg) => {
                 app.push_system_message(format!("Network error: {msg}"));
+            }
+            NetEvent::PresenceChanged { peer_id, status } => {
+                let presence = match status.as_str() {
+                    "Online" => PresenceStatus::Online,
+                    "Away" => PresenceStatus::Away,
+                    _ => PresenceStatus::Offline,
+                };
+                app.set_peer_presence(&peer_id, presence);
+            }
+            NetEvent::TypingChanged {
+                peer_id,
+                room_id,
+                is_typing,
+            } => {
+                app.set_peer_typing(&room_id, &peer_id, is_typing);
+            }
+            NetEvent::RoomCreated { room_id: _, name } => {
+                app.add_conversation(&format!("# {name}"), None);
+                app.push_system_message(format!("Room '{name}' created"));
+            }
+            NetEvent::RoomList { rooms } => {
+                if rooms.is_empty() {
+                    app.push_system_message("No rooms available".to_string());
+                } else {
+                    app.push_system_message("Available rooms:".to_string());
+                    for (room_id, name, member_count) in &rooms {
+                        app.push_system_message(format!(
+                            "  {name} ({room_id}) — {member_count} members"
+                        ));
+                    }
+                }
+            }
+            NetEvent::JoinRequestReceived {
+                room_id: _,
+                peer_id: _,
+                display_name,
+            } => {
+                app.push_system_message(format!("{display_name} wants to join the room"));
+            }
+            NetEvent::JoinApproved { room_id: _, name } => {
+                app.add_conversation(&format!("# {name}"), None);
+                app.push_system_message(format!("Joined room '{name}'"));
+            }
+            NetEvent::JoinDenied { room_id: _, reason } => {
+                app.push_system_message(format!("Join request denied: {reason}"));
             }
         }
     }

@@ -81,3 +81,7 @@ path = "../tests/integration/tui_net_wiring.rs"
 [[test]]
 name = "relay_reconnect"
 path = "../tests/integration/relay_reconnect.rs"
+
+[[test]]
+name = "tui_live_backend"
+path = "../tests/integration/tui_live_backend.rs"

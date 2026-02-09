@@ -229,6 +229,12 @@ impl<C: CryptoSession, T: Transport, S: MessageStore> ChatManager<C, T, S> {
         self.statuses.lock().await.get(message_id).cloned()
     }
 
+    /// Returns a reference to the local sender identity.
+    #[must_use]
+    pub const fn sender_id(&self) -> &SenderId {
+        &self.sender_id
+    }
+
     /// Returns a reference to the underlying transport.
     #[must_use]
     pub const fn transport(&self) -> &T {

@@ -312,6 +312,7 @@ async fn reconnect_after_relay_restart() {
     // Alice sends a message after reconnect.
     cmd_tx
         .send(NetCommand::SendMessage {
+            conversation_id: "@ test".to_string(),
             text: "Hello after reconnect!".to_string(),
         })
         .await
@@ -364,6 +365,7 @@ async fn queued_messages_sent_after_reconnect() {
     for i in 1..=3 {
         alice_cmd_tx
             .send(NetCommand::SendMessage {
+                conversation_id: "@ test".to_string(),
                 text: format!("Queued message {i}"),
             })
             .await
@@ -544,6 +546,7 @@ async fn send_during_reconnection_queues_message() {
     // Send a message while reconnection is in progress.
     cmd_tx
         .send(NetCommand::SendMessage {
+            conversation_id: "@ test".to_string(),
             text: "Message during reconnect".to_string(),
         })
         .await
@@ -636,6 +639,7 @@ async fn graceful_shutdown_during_reconnect() {
     if !closed {
         let result = cmd_tx
             .send(NetCommand::SendMessage {
+                conversation_id: "@ test".to_string(),
                 text: "after shutdown".to_string(),
             })
             .await;

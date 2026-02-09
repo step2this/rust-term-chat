@@ -7,6 +7,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use termchat_proto::presence::PresenceStatus;
 
+use crate::net::NetCommand;
+
 /// Which panel is currently focused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanelFocus {
@@ -79,6 +81,8 @@ pub struct DisplayMessage {
     pub timestamp: String,
     /// Status indicator (e.g., "sent", "delivered", "read").
     pub status: MessageStatus,
+    /// Unique message ID (for tracking delivery status).
+    pub message_id: Option<String>,
 }
 
 /// Message delivery status.
@@ -136,8 +140,8 @@ pub struct App {
     pub input: String,
     /// Cursor position in input (character index).
     pub cursor_position: usize,
-    /// Messages in the current conversation.
-    pub messages: Vec<DisplayMessage>,
+    /// Messages per conversation (keyed by conversation name, e.g., "@ bob", "# dev").
+    pub messages: HashMap<String, Vec<DisplayMessage>>,
     /// Which panel is focused.
     pub focus: PanelFocus,
     /// Scroll offset for message list.
@@ -160,18 +164,58 @@ pub struct App {
     pub typing_timer: Option<Instant>,
     /// Whether the local user is currently shown as typing.
     pub local_typing: bool,
+    /// Whether the app is connected to a relay/transport.
+    pub is_connected: bool,
+    /// Transport type description (e.g., "Relay", "P2P", "").
+    pub connection_info: String,
     /// Typing indicator timeout in seconds (configurable).
     typing_timeout_secs: u64,
     /// Maximum task title length in characters (configurable).
     max_task_title_len: usize,
+    /// Counter for generating unique message IDs.
+    next_message_id: u64,
 }
 
 impl App {
-    /// Create a new application with demo data.
+    /// Create a new application with empty state (no demo data).
+    ///
+    /// All conversations, messages, presence, and typing state start empty.
+    /// Use [`add_conversation`] to populate from network events or CLI args.
     #[must_use]
-    #[allow(clippy::too_many_lines)]
     pub fn new() -> Self {
-        let conversations = vec![
+        Self {
+            input: String::new(),
+            cursor_position: 0,
+            messages: HashMap::new(),
+            focus: PanelFocus::Input,
+            message_scroll: 0,
+            conversations: Vec::new(),
+            selected_conversation: 0,
+            should_quit: false,
+            tasks: Vec::new(),
+            selected_task: 0,
+            presence_map: HashMap::new(),
+            typing_peers: HashMap::new(),
+            typing_timer: None,
+            local_typing: false,
+            is_connected: false,
+            connection_info: String::new(),
+            typing_timeout_secs: DEFAULT_TYPING_TIMEOUT_SECS,
+            max_task_title_len: DEFAULT_MAX_TASK_TITLE_LEN,
+            next_message_id: 0,
+        }
+    }
+
+    /// Create a new application with demo data for testing.
+    ///
+    /// Provides hardcoded conversations, messages, and presence data
+    /// matching the original Phase 1 TUI demo.
+    #[cfg(test)]
+    #[must_use]
+    pub fn new_with_demo() -> Self {
+        let mut app = Self::new();
+
+        app.conversations = vec![
             ConversationItem {
                 name: "# general".to_string(),
                 unread_count: 0,
@@ -195,99 +239,35 @@ impl App {
             },
         ];
 
-        // Demo presence data
-        let mut presence_map = HashMap::new();
-        presence_map.insert("Alice".to_string(), PresenceStatus::Online);
-        presence_map.insert("Bob".to_string(), PresenceStatus::Away);
+        app.presence_map
+            .insert("Alice".to_string(), PresenceStatus::Online);
+        app.presence_map
+            .insert("Bob".to_string(), PresenceStatus::Away);
 
-        // Demo typing data — Alice is typing in general
-        let mut typing_peers = HashMap::new();
         let mut general_typing = HashSet::new();
         general_typing.insert("Alice".to_string());
-        typing_peers.insert("general".to_string(), general_typing);
+        app.typing_peers
+            .insert("general".to_string(), general_typing);
 
-        let messages = vec![
+        let demo_messages = vec![
             DisplayMessage {
                 sender: "Alice".to_string(),
                 content: "Hey there!".to_string(),
                 timestamp: "14:23".to_string(),
                 status: MessageStatus::Read,
-            },
-            DisplayMessage {
-                sender: "Bob".to_string(),
-                content: "Hello!".to_string(),
-                timestamp: "14:25".to_string(),
-                status: MessageStatus::Read,
-            },
-            DisplayMessage {
-                sender: "Alice".to_string(),
-                content: "How's the new terminal chat app coming along?".to_string(),
-                timestamp: "14:27".to_string(),
-                status: MessageStatus::Read,
+                message_id: None,
             },
             DisplayMessage {
                 sender: "You".to_string(),
                 content: "Working on TUI".to_string(),
                 timestamp: "14:30".to_string(),
                 status: MessageStatus::Delivered,
-            },
-            DisplayMessage {
-                sender: "Bob".to_string(),
-                content: "Nice! Can't wait to try it out.".to_string(),
-                timestamp: "14:31".to_string(),
-                status: MessageStatus::Read,
-            },
-            DisplayMessage {
-                sender: "Alice".to_string(),
-                content: "Me too! The terminal-first approach is really cool.".to_string(),
-                timestamp: "14:32".to_string(),
-                status: MessageStatus::Read,
-            },
-            DisplayMessage {
-                sender: "You".to_string(),
-                content: "Thanks! Building it with Ratatui and it's pretty straightforward so far."
-                    .to_string(),
-                timestamp: "14:35".to_string(),
-                status: MessageStatus::Sent,
-            },
-            DisplayMessage {
-                sender: "Bob".to_string(),
-                content: "Ratatui is awesome. Are you using crossterm for the backend?".to_string(),
-                timestamp: "14:36".to_string(),
-                status: MessageStatus::Read,
-            },
-            DisplayMessage {
-                sender: "You".to_string(),
-                content: "Yep! Crossterm handles all the terminal events perfectly.".to_string(),
-                timestamp: "14:38".to_string(),
-                status: MessageStatus::Delivered,
-            },
-            DisplayMessage {
-                sender: "Alice".to_string(),
-                content: "Looking forward to the P2P networking part!".to_string(),
-                timestamp: "14:40".to_string(),
-                status: MessageStatus::Read,
+                message_id: None,
             },
         ];
+        app.messages.insert("# general".to_string(), demo_messages);
 
-        Self {
-            input: String::new(),
-            cursor_position: 0,
-            messages,
-            focus: PanelFocus::Input,
-            message_scroll: 0,
-            conversations,
-            selected_conversation: 0,
-            should_quit: false,
-            tasks: Vec::new(),
-            selected_task: 0,
-            presence_map,
-            typing_peers,
-            typing_timer: None,
-            local_typing: false,
-            typing_timeout_secs: DEFAULT_TYPING_TIMEOUT_SECS,
-            max_task_title_len: DEFAULT_MAX_TASK_TITLE_LEN,
-        }
+        app
     }
 
     /// Set the typing indicator timeout in seconds.
@@ -304,21 +284,114 @@ impl App {
         self
     }
 
+    /// Generate a unique message ID.
+    fn next_msg_id(&mut self) -> String {
+        let id = self.next_message_id;
+        self.next_message_id += 1;
+        format!("msg-{id}")
+    }
+
+    /// Update connection status.
+    pub fn set_connection_status(&mut self, connected: bool, info: &str) {
+        self.is_connected = connected;
+        self.connection_info = info.to_string();
+    }
+
+    /// Check if the app is able to send messages.
+    ///
+    /// Returns `true` if connected, `false` otherwise.
+    #[must_use]
+    pub const fn can_send(&self) -> bool {
+        self.is_connected
+    }
+
+    /// Add a conversation to the sidebar if it doesn't already exist.
+    ///
+    /// Returns `true` if the conversation was added, `false` if it already existed.
+    pub fn add_conversation(&mut self, name: &str, presence: Option<PresenceStatus>) -> bool {
+        if self.conversations.iter().any(|c| c.name == name) {
+            return false;
+        }
+        self.conversations.push(ConversationItem {
+            name: name.to_string(),
+            unread_count: 0,
+            last_message_preview: None,
+            is_agent: false,
+            presence,
+        });
+        true
+    }
+
+    /// Push a message into a specific conversation.
+    ///
+    /// Auto-creates the conversation if it doesn't exist (extension 10a).
+    /// Increments unread count if the conversation is not currently selected.
+    pub fn push_message(&mut self, conversation: &str, msg: DisplayMessage) {
+        // Auto-create conversation if needed.
+        self.add_conversation(conversation, None);
+
+        // Check if this is the active conversation before taking a mutable borrow.
+        let is_selected = self
+            .conversations
+            .get(self.selected_conversation)
+            .is_some_and(|c| c.name == conversation);
+
+        // Update last_message_preview.
+        if let Some(conv) = self
+            .conversations
+            .iter_mut()
+            .find(|c| c.name == conversation)
+        {
+            conv.last_message_preview = Some(format!("{}: {}", msg.sender, msg.content));
+
+            // Increment unread if this is not the active conversation.
+            if !is_selected {
+                conv.unread_count += 1;
+            }
+        }
+
+        self.messages
+            .entry(conversation.to_string())
+            .or_default()
+            .push(msg);
+    }
+
+    /// Get messages for the currently selected conversation.
+    #[must_use]
+    pub fn current_messages(&self) -> &[DisplayMessage] {
+        self.conversations
+            .get(self.selected_conversation)
+            .and_then(|conv| self.messages.get(&conv.name))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// Get the name of the currently selected conversation, if any.
+    #[must_use]
+    pub fn selected_conversation_name(&self) -> Option<&str> {
+        self.conversations
+            .get(self.selected_conversation)
+            .map(|c| c.name.as_str())
+    }
+
     /// Handle a key event.
-    pub fn handle_key_event(&mut self, key: KeyEvent) {
+    ///
+    /// Returns `Some(NetCommand)` if the key event produced a command that needs
+    /// to be dispatched to the networking layer (e.g., sending a message or a
+    /// slash command like `/create-room`).
+    pub fn handle_key_event(&mut self, key: KeyEvent) -> Option<NetCommand> {
         // Global shortcuts
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => {
                 self.should_quit = true;
-                return;
+                return None;
             }
             (KeyCode::Tab, KeyModifiers::SHIFT) => {
                 self.cycle_focus_backward();
-                return;
+                return None;
             }
             (KeyCode::Tab | KeyCode::BackTab, _) => {
                 self.cycle_focus_forward();
-                return;
+                return None;
             }
             _ => {}
         }
@@ -326,22 +399,35 @@ impl App {
         // Focus-specific shortcuts
         match self.focus {
             PanelFocus::Input => self.handle_input_key(key),
-            PanelFocus::Sidebar => self.handle_sidebar_key(key),
-            PanelFocus::Chat => self.handle_chat_key(key),
-            PanelFocus::Tasks => self.handle_tasks_key(key),
+            PanelFocus::Sidebar => {
+                self.handle_sidebar_key(key);
+                None
+            }
+            PanelFocus::Chat => {
+                self.handle_chat_key(key);
+                None
+            }
+            PanelFocus::Tasks => {
+                self.handle_tasks_key(key);
+                None
+            }
         }
     }
 
     /// Handle key event when input is focused.
-    fn handle_input_key(&mut self, key: KeyEvent) {
+    ///
+    /// Returns `Some(NetCommand)` if Enter was pressed and the input produced
+    /// a command that needs network dispatch.
+    fn handle_input_key(&mut self, key: KeyEvent) -> Option<NetCommand> {
         match key.code {
             KeyCode::Enter => {
                 self.stop_typing();
-                self.submit_message();
+                self.submit_message()
             }
             KeyCode::Char(c) => {
                 self.enter_char(c);
                 self.start_typing();
+                None
             }
             KeyCode::Backspace => {
                 self.delete_char();
@@ -350,17 +436,30 @@ impl App {
                 } else {
                     self.start_typing();
                 }
+                None
             }
-            KeyCode::Left => self.move_cursor_left(),
-            KeyCode::Right => self.move_cursor_right(),
-            KeyCode::Home => self.cursor_position = 0,
-            KeyCode::End => self.cursor_position = self.input.len(),
-            _ => {}
+            KeyCode::Left => {
+                self.move_cursor_left();
+                None
+            }
+            KeyCode::Right => {
+                self.move_cursor_right();
+                None
+            }
+            KeyCode::Home => {
+                self.cursor_position = 0;
+                None
+            }
+            KeyCode::End => {
+                self.cursor_position = self.input.len();
+                None
+            }
+            _ => None,
         }
     }
 
     /// Handle key event when sidebar is focused.
-    const fn handle_sidebar_key(&mut self, key: KeyEvent) {
+    fn handle_sidebar_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => self.prev_conversation(),
             KeyCode::Down | KeyCode::Char('j') => self.next_conversation(),
@@ -369,7 +468,7 @@ impl App {
     }
 
     /// Handle key event when chat is focused.
-    const fn handle_chat_key(&mut self, key: KeyEvent) {
+    fn handle_chat_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => self.scroll_up(),
             KeyCode::Down | KeyCode::Char('j') => self.scroll_down(),
@@ -542,47 +641,158 @@ impl App {
     }
 
     /// Submit the current input as a message or handle a `/` command.
-    fn submit_message(&mut self) {
+    ///
+    /// Returns `Some(NetCommand)` if a network action is required (e.g., sending a message),
+    /// `None` otherwise.
+    pub fn submit_message(&mut self) -> Option<NetCommand> {
         if self.input.trim().is_empty() {
-            return;
+            return None;
         }
 
         let trimmed = self.input.trim().to_string();
 
         // Route slash commands
         if trimmed.starts_with('/') {
-            self.handle_command(&trimmed);
+            let cmd = self.handle_command(&trimmed);
             self.input.clear();
             self.cursor_position = 0;
-            return;
+            return cmd;
         }
 
+        // Extension 9a: Validate message size before creating DisplayMessage
+        if self.input.len() > 65536 {
+            self.push_system_message("Message too long (max 64KB)".to_string());
+            return None;
+        }
+
+        let message_id = self.next_msg_id();
         let message = DisplayMessage {
             sender: "You".to_string(),
             content: self.input.clone(),
             timestamp: chrono::Local::now().format("%H:%M").to_string(),
-            status: MessageStatus::Sent,
+            status: MessageStatus::Sending,
+            message_id: Some(message_id),
         };
 
-        self.messages.push(message);
+        // Clone conversation name before taking mutable borrows
+        let conv_name = self.selected_conversation_name().map(String::from);
+        let text = self.input.clone();
+
+        let net_command = if let Some(conv_name) = conv_name {
+            self.push_message(&conv_name, message);
+            // Auto-scroll to bottom of current conversation.
+            self.message_scroll = self.current_messages().len().saturating_sub(1);
+
+            // Return the NetCommand to send the message
+            Some(NetCommand::SendMessage {
+                conversation_id: conv_name,
+                text,
+            })
+        } else {
+            None
+        };
+
         self.input.clear();
         self.cursor_position = 0;
-
-        // Auto-scroll to bottom
-        self.message_scroll = self.messages.len().saturating_sub(1);
+        net_command
     }
 
     /// Handle a `/` command from the input box.
-    fn handle_command(&mut self, input: &str) {
+    ///
+    /// Returns `Some(NetCommand)` if the command needs to be sent to the network layer,
+    /// `None` otherwise.
+    fn handle_command(&mut self, input: &str) -> Option<NetCommand> {
         let parts: Vec<&str> = input.splitn(2, ' ').collect();
         let command = parts[0];
         let args = parts.get(1).copied().unwrap_or("").trim();
 
         match command {
-            "/invite-agent" => self.handle_invite_agent(args),
-            "/task" => self.handle_task_command(args),
+            "/invite-agent" => {
+                self.handle_invite_agent(args);
+                None
+            }
+            "/task" => {
+                self.handle_task_command(args);
+                None
+            }
+            "/create-room" => {
+                if !self.is_connected {
+                    self.push_system_message("Not connected".to_string());
+                    return None;
+                }
+                if args.is_empty() {
+                    self.push_system_message("Usage: /create-room <name>".to_string());
+                    return None;
+                }
+                Some(NetCommand::CreateRoom {
+                    name: args.to_string(),
+                })
+            }
+            "/list-rooms" => {
+                if !self.is_connected {
+                    self.push_system_message("Not connected".to_string());
+                    return None;
+                }
+                Some(NetCommand::ListRooms)
+            }
+            "/join-room" => {
+                if !self.is_connected {
+                    self.push_system_message("Not connected".to_string());
+                    return None;
+                }
+                if args.is_empty() {
+                    self.push_system_message("Usage: /join-room <room-id>".to_string());
+                    return None;
+                }
+                Some(NetCommand::JoinRoom {
+                    room_id: args.to_string(),
+                })
+            }
+            "/approve" => {
+                if !self.is_connected {
+                    self.push_system_message("Not connected".to_string());
+                    return None;
+                }
+                if args.is_empty() {
+                    self.push_system_message("Usage: /approve <peer-id>".to_string());
+                    return None;
+                }
+                // Derive room_id from selected conversation name (strip "# " prefix)
+                if let Some(conv_name) = self.selected_conversation_name()
+                    && let Some(room_id) = conv_name.strip_prefix("# ")
+                {
+                    return Some(NetCommand::ApproveJoin {
+                        room_id: room_id.to_string(),
+                        peer_id: args.to_string(),
+                    });
+                }
+                self.push_system_message("Must be in a room to approve join requests".to_string());
+                None
+            }
+            "/deny" => {
+                if !self.is_connected {
+                    self.push_system_message("Not connected".to_string());
+                    return None;
+                }
+                if args.is_empty() {
+                    self.push_system_message("Usage: /deny <peer-id>".to_string());
+                    return None;
+                }
+                // Derive room_id from selected conversation name (strip "# " prefix)
+                if let Some(conv_name) = self.selected_conversation_name()
+                    && let Some(room_id) = conv_name.strip_prefix("# ")
+                {
+                    return Some(NetCommand::DenyJoin {
+                        room_id: room_id.to_string(),
+                        peer_id: args.to_string(),
+                    });
+                }
+                self.push_system_message("Must be in a room to deny join requests".to_string());
+                None
+            }
             _ => {
                 self.push_system_message(format!("Unknown command: {command}"));
+                None
             }
         }
     }
@@ -615,16 +825,25 @@ impl App {
         ));
     }
 
-    /// Push a system-generated status message into the chat panel.
+    /// Push a system-generated status message into the current conversation.
+    ///
+    /// If no conversation is selected, the message is pushed to a special
+    /// "__system__" conversation.
     pub fn push_system_message(&mut self, content: String) {
-        self.messages.push(DisplayMessage {
+        let msg = DisplayMessage {
             sender: "System".to_string(),
             content,
             timestamp: chrono::Local::now().format("%H:%M").to_string(),
             status: MessageStatus::Delivered,
-        });
-        // Auto-scroll to bottom
-        self.message_scroll = self.messages.len().saturating_sub(1);
+            message_id: None,
+        };
+        let conv_name = self
+            .selected_conversation_name()
+            .unwrap_or("__system__")
+            .to_string();
+        self.messages.entry(conv_name).or_default().push(msg);
+        // Auto-scroll to bottom.
+        self.message_scroll = self.current_messages().len().saturating_sub(1);
     }
 
     /// Insert a character at the cursor position.
@@ -663,23 +882,34 @@ impl App {
     }
 
     /// Scroll message list down.
-    const fn scroll_down(&mut self) {
-        if self.message_scroll < self.messages.len().saturating_sub(1) {
+    fn scroll_down(&mut self) {
+        let len = self.current_messages().len();
+        if self.message_scroll < len.saturating_sub(1) {
             self.message_scroll += 1;
         }
     }
 
     /// Select the previous conversation.
-    const fn prev_conversation(&mut self) {
+    fn prev_conversation(&mut self) {
         if self.selected_conversation > 0 {
             self.selected_conversation -= 1;
+            self.on_conversation_selected();
         }
     }
 
     /// Select the next conversation.
-    const fn next_conversation(&mut self) {
+    fn next_conversation(&mut self) {
         if self.selected_conversation < self.conversations.len().saturating_sub(1) {
             self.selected_conversation += 1;
+            self.on_conversation_selected();
+        }
+    }
+
+    /// Called when the user switches to a conversation — resets scroll and unread.
+    fn on_conversation_selected(&mut self) {
+        self.message_scroll = self.current_messages().len().saturating_sub(1);
+        if let Some(conv) = self.conversations.get_mut(self.selected_conversation) {
+            conv.unread_count = 0;
         }
     }
 
@@ -759,18 +989,37 @@ mod tests {
     fn submit_input(app: &mut App, text: &str) {
         app.input = text.to_string();
         app.cursor_position = text.len();
-        app.submit_message();
+        let _ = app.submit_message();
+    }
+
+    /// Helper: get all messages from the system/selected conversation.
+    ///
+    /// With `App::new()` (no conversations), system messages go to `__system__`.
+    fn system_msgs(app: &App) -> &[DisplayMessage] {
+        let conv = app.selected_conversation_name().unwrap_or("__system__");
+        app.messages.get(conv).map_or(&[], Vec::as_slice)
+    }
+
+    /// Helper: get the last message from the system/selected conversation.
+    fn last_msg(app: &App) -> &DisplayMessage {
+        let msgs = system_msgs(app);
+        msgs.last().expect("expected at least one message")
+    }
+
+    /// Helper: count messages in the current/system conversation.
+    fn msg_count(app: &App) -> usize {
+        system_msgs(app).len()
     }
 
     #[test]
     fn invite_agent_no_args_shows_usage() {
         let mut app = App::new();
-        let initial_count = app.messages.len();
+        let initial_count = msg_count(&app);
 
         submit_input(&mut app, "/invite-agent");
 
-        assert_eq!(app.messages.len(), initial_count + 1);
-        let last = &app.messages[app.messages.len() - 1];
+        assert_eq!(msg_count(&app), initial_count + 1);
+        let last = last_msg(&app);
         assert_eq!(last.sender, "System");
         assert!(last.content.contains("Usage:"));
     }
@@ -778,26 +1027,26 @@ mod tests {
     #[test]
     fn invite_agent_room_not_found() {
         let mut app = App::new();
-        let initial_count = app.messages.len();
+        let initial_count = msg_count(&app);
 
         submit_input(&mut app, "/invite-agent nonexistent");
 
-        assert_eq!(app.messages.len(), initial_count + 1);
-        let last = &app.messages[app.messages.len() - 1];
+        assert_eq!(msg_count(&app), initial_count + 1);
+        let last = last_msg(&app);
         assert_eq!(last.sender, "System");
         assert!(last.content.contains("not found"));
     }
 
     #[test]
     fn invite_agent_valid_room_shows_bridge_status() {
-        let mut app = App::new();
-        // App::new() has a "# general" conversation
-        let initial_count = app.messages.len();
+        let mut app = App::new_with_demo();
+        // App::new_with_demo() has a "# general" conversation
+        let initial_count = msg_count(&app);
 
         submit_input(&mut app, "/invite-agent general");
 
-        assert_eq!(app.messages.len(), initial_count + 1);
-        let last = &app.messages[app.messages.len() - 1];
+        assert_eq!(msg_count(&app), initial_count + 1);
+        let last = last_msg(&app);
         assert_eq!(last.sender, "System");
         assert!(last.content.contains("Agent bridge listening on"));
         assert!(last.content.contains("Waiting for agent to connect"));
@@ -806,19 +1055,19 @@ mod tests {
     #[test]
     fn unknown_command_shows_error() {
         let mut app = App::new();
-        let initial_count = app.messages.len();
+        let initial_count = msg_count(&app);
 
         submit_input(&mut app, "/foobar");
 
-        assert_eq!(app.messages.len(), initial_count + 1);
-        let last = &app.messages[app.messages.len() - 1];
+        assert_eq!(msg_count(&app), initial_count + 1);
+        let last = last_msg(&app);
         assert_eq!(last.sender, "System");
         assert!(last.content.contains("Unknown command: /foobar"));
     }
 
     #[test]
     fn slash_command_clears_input() {
-        let mut app = App::new();
+        let mut app = App::new_with_demo();
         submit_input(&mut app, "/invite-agent general");
         assert!(app.input.is_empty());
         assert_eq!(app.cursor_position, 0);
@@ -827,12 +1076,15 @@ mod tests {
     #[test]
     fn regular_message_not_treated_as_command() {
         let mut app = App::new();
-        let initial_count = app.messages.len();
+        app.add_conversation("# test", None);
+        // Select the "# test" conversation (index 0).
+        app.selected_conversation = 0;
+        let initial_count = msg_count(&app);
 
         submit_input(&mut app, "hello world");
 
-        assert_eq!(app.messages.len(), initial_count + 1);
-        let last = &app.messages[app.messages.len() - 1];
+        assert_eq!(msg_count(&app), initial_count + 1);
+        let last = last_msg(&app);
         assert_eq!(last.sender, "You");
         assert_eq!(last.content, "hello world");
     }
@@ -841,7 +1093,7 @@ mod tests {
     fn system_message_auto_scrolls() {
         let mut app = App::new();
         app.push_system_message("test".to_string());
-        assert_eq!(app.message_scroll, app.messages.len() - 1);
+        assert_eq!(app.message_scroll, msg_count(&app) - 1);
     }
 
     #[test]
@@ -926,24 +1178,24 @@ mod tests {
     #[test]
     fn task_add_no_title_shows_error() {
         let mut app = App::new();
-        let initial_count = app.messages.len();
+        let initial_count = msg_count(&app);
         submit_input(&mut app, "/task add");
         assert!(app.tasks.is_empty());
-        let last = &app.messages[app.messages.len() - 1];
+        let last = last_msg(&app);
         assert_eq!(last.sender, "System");
         assert!(last.content.contains("title cannot be empty"));
-        assert!(app.messages.len() > initial_count);
+        assert!(msg_count(&app) > initial_count);
     }
 
     #[test]
     fn task_add_pushes_system_message() {
         let mut app = App::new();
-        let initial_count = app.messages.len();
+        let initial_count = msg_count(&app);
         submit_input(&mut app, "/task add Write tests");
-        let last = &app.messages[app.messages.len() - 1];
+        let last = last_msg(&app);
         assert_eq!(last.sender, "System");
         assert!(last.content.contains("Task created: Write tests"));
-        assert!(app.messages.len() > initial_count);
+        assert!(msg_count(&app) > initial_count);
     }
 
     #[test]
@@ -952,7 +1204,7 @@ mod tests {
         submit_input(&mut app, "/task add My task");
         submit_input(&mut app, "/task done 1");
         assert_eq!(app.tasks[0].status, TaskDisplayStatus::Completed);
-        let last = &app.messages[app.messages.len() - 1];
+        let last = last_msg(&app);
         assert!(last.content.contains("Task #1 marked as completed"));
     }
 
@@ -960,7 +1212,7 @@ mod tests {
     fn task_done_not_found() {
         let mut app = App::new();
         submit_input(&mut app, "/task done 99");
-        let last = &app.messages[app.messages.len() - 1];
+        let last = last_msg(&app);
         assert!(last.content.contains("Task #99 not found"));
     }
 
@@ -970,7 +1222,7 @@ mod tests {
         submit_input(&mut app, "/task add Review PR");
         submit_input(&mut app, "/task assign 1 @alice");
         assert_eq!(app.tasks[0].assignee.as_deref(), Some("alice"));
-        let last = &app.messages[app.messages.len() - 1];
+        let last = last_msg(&app);
         assert!(last.content.contains("Task #1 assigned to alice"));
     }
 
@@ -991,7 +1243,7 @@ mod tests {
         submit_input(&mut app, "/task delete 1");
         assert_eq!(app.tasks.len(), 1);
         assert_eq!(app.tasks[0].title, "Second");
-        let last = &app.messages[app.messages.len() - 1];
+        let last = last_msg(&app);
         assert!(last.content.contains("Task #1 deleted"));
     }
 
@@ -999,7 +1251,7 @@ mod tests {
     fn task_delete_not_found() {
         let mut app = App::new();
         submit_input(&mut app, "/task delete 42");
-        let last = &app.messages[app.messages.len() - 1];
+        let last = last_msg(&app);
         assert!(last.content.contains("Task #42 not found"));
     }
 
@@ -1007,7 +1259,7 @@ mod tests {
     fn task_list_empty() {
         let mut app = App::new();
         submit_input(&mut app, "/task list");
-        let last = &app.messages[app.messages.len() - 1];
+        let last = last_msg(&app);
         assert!(last.content.contains("No tasks"));
     }
 
@@ -1016,12 +1268,13 @@ mod tests {
         let mut app = App::new();
         submit_input(&mut app, "/task add Alpha");
         submit_input(&mut app, "/task add Beta");
-        let before = app.messages.len();
+        let before = msg_count(&app);
         submit_input(&mut app, "/task list");
         // Should have added 2 system messages (one per task)
-        assert_eq!(app.messages.len(), before + 2);
-        assert!(app.messages[before].content.contains("#1 [ ] Alpha"));
-        assert!(app.messages[before + 1].content.contains("#2 [ ] Beta"));
+        let msgs = system_msgs(&app);
+        assert_eq!(msgs.len(), before + 2);
+        assert!(msgs[before].content.contains("#1 [ ] Alpha"));
+        assert!(msgs[before + 1].content.contains("#2 [ ] Beta"));
     }
 
     #[test]
@@ -1029,16 +1282,17 @@ mod tests {
         let mut app = App::new();
         submit_input(&mut app, "/task add Do thing");
         submit_input(&mut app, "/task assign 1 @carol");
-        let before = app.messages.len();
+        let before = msg_count(&app);
         submit_input(&mut app, "/task list");
-        assert!(app.messages[before].content.contains("(@carol)"));
+        let msgs = system_msgs(&app);
+        assert!(msgs[before].content.contains("(@carol)"));
     }
 
     #[test]
     fn task_unknown_subcommand_shows_usage() {
         let mut app = App::new();
         submit_input(&mut app, "/task foobar");
-        let last = &app.messages[app.messages.len() - 1];
+        let last = last_msg(&app);
         assert!(
             last.content
                 .contains("Usage: /task add|done|assign|delete|list")
@@ -1129,7 +1383,7 @@ mod tests {
         let long_title = "x".repeat(257);
         submit_input(&mut app, &format!("/task add {long_title}"));
         assert!(app.tasks.is_empty());
-        let last = &app.messages[app.messages.len() - 1];
+        let last = last_msg(&app);
         assert!(last.content.contains("title too long"));
     }
 
@@ -1146,7 +1400,7 @@ mod tests {
     fn task_done_invalid_number() {
         let mut app = App::new();
         submit_input(&mut app, "/task done abc");
-        let last = &app.messages[app.messages.len() - 1];
+        let last = last_msg(&app);
         assert!(last.content.contains("Usage:"));
     }
 
@@ -1155,7 +1409,7 @@ mod tests {
         let mut app = App::new();
         submit_input(&mut app, "/task add Test");
         submit_input(&mut app, "/task assign 1");
-        let last = &app.messages[app.messages.len() - 1];
+        let last = last_msg(&app);
         assert!(last.content.contains("Usage:"));
     }
 
@@ -1163,7 +1417,7 @@ mod tests {
     fn task_assign_not_found() {
         let mut app = App::new();
         submit_input(&mut app, "/task assign 99 @bob");
-        let last = &app.messages[app.messages.len() - 1];
+        let last = last_msg(&app);
         assert!(last.content.contains("Task #99 not found"));
     }
 

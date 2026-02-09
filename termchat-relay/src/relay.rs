@@ -318,6 +318,7 @@ async fn handle_binary_message(peer_id: &str, data: &[u8], state: &Arc<RelayStat
 }
 
 /// Handles a room protocol message from a registered peer.
+#[allow(clippy::too_many_lines)]
 async fn handle_room_message(peer_id: &str, room_bytes: &[u8], state: &Arc<RelayState>) {
     let room_msg = match room::decode(room_bytes) {
         Ok(m) => m,

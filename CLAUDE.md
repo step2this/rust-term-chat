@@ -6,7 +6,47 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project State
 
-Active development. Three-crate workspace is initialized and building. Completed: UC-001 through UC-013 (Send, Receive, P2P, Relay, E2E, Rooms, Agent, Tasks, Presence, Live Relay, Auto-Reconnect, Polish, Dependency Hygiene), Phase 1 (Hello Ratatui TUI). Sprint 9 (Hardening) complete: cargo-deny audit with deny.toml policy, rand 0.8→0.9 upgrade, CI cargo-deny enforcement, CRDT evaluation documented. 685 tests passing.
+Active development. Three-crate workspace initialized and building. Completed: UC-001 through UC-016 (Send, Receive, P2P, Relay, E2E, Rooms, Agent, Tasks, Presence, Live Relay, Auto-Reconnect, Polish, Dependency Hygiene, ChatManager Refactor, Agent Crypto Fan-Out, Join Relay Routing), Phase 1 (Hello Ratatui TUI). Sprint 10 complete: parallel feature branches for refactoring, integration testing, and relay routing. 699 tests passing.
+
+## MANDATORY: Forge Workflow & Delegation Rules
+
+**STOP. Before writing ANY code, verify ALL of these are true:**
+
+1. **A UC document exists** in `docs/use-cases/` for the work you're about to do
+   - If not: run `/uc-create` first. No exceptions.
+2. **The UC has been reviewed** via `/uc-review` and all CRITICAL issues fixed
+   - If not: run `/uc-review` first. Do not skip this — it catches 40% of waste.
+3. **Tasks have been decomposed** in `docs/tasks/uc-NNN-tasks.md`
+   - If not: run `/task-decompose` first.
+4. **A team plan exists** in `docs/teams/uc-NNN-team.md` (for High/XL complexity UCs)
+   - If not: run `/agent-team-plan` first.
+5. **You are on a feature branch worktree**, not main
+   - If not: `git worktree add ../rust-term-chat-uc-NNN -b feature/uc-NNN-slug`
+6. **You are delegating implementation to subagents**, not writing code yourself
+   - The Lead NEVER writes production code directly. Use the `Task` tool.
+   - This applies even for "quick fixes" and "small changes" — delegate them.
+   - The Lead's job: coordinate, create tasks, spawn agents, run gates, integrate.
+
+**Common failure modes to watch for (these have happened before):**
+
+- "This is small, I'll just do it myself" → NO. Spawn a subagent. Always.
+- "I'll start coding while planning the team" → NO. Plan first, delegate second.
+- "I'll edit this one file quickly" → NO. Even single-file edits go through subagents.
+- "T-017-01 is a prerequisite, the Lead should handle it" → NO. Delegate to a subagent.
+- "I already read the file, might as well edit it" → NO. Reading is fine. Editing is not.
+
+**The Lead's permitted actions (exhaustive list):**
+
+- Read files (Glob, Grep, Read) — for understanding and coordination
+- Run shell commands (cargo build, cargo test, git) — for gates and integration
+- Create/update docs (CLAUDE.md, docs/, sprint files) — for project management
+- Spawn subagents (Task tool) — for ALL implementation work
+- Create teams (TeamCreate) — for multi-agent coordination
+- Create/update tasks (TaskCreate, TaskUpdate) — for tracking
+- Send messages (SendMessage) — for team coordination
+- Edit ONLY `main.rs` and `Cargo.toml` during integration phases (2C/3C) — and ONLY after builder tracks complete, via subagent when possible
+
+**If you catch yourself about to use Edit or Write on a .rs file: STOP and spawn a subagent instead.**
 
 ## Build & Development Commands
 
@@ -113,7 +153,7 @@ When running multi-agent teams, assign module ownership to prevent merge conflic
 - All public functions must have doc comments
 - No `unwrap()` in production code — use `Result` with `thiserror`
 - Commit after each completed use case, not after each file change — never bundle multiple UCs into one commit
-- **ALWAYS USE THE FORGE.** UC doc first (`/uc-create`), then `/uc-review`, then `/task-decompose`, then implement on a feature branch via `git worktree add`. Never skip straight to code on main. Reference `@.claude/skills/pre-implementation-checklist.md` before starting.
+- **ALWAYS USE THE FORGE.** See "MANDATORY: Forge Workflow & Delegation Rules" section above. UC doc → review → task-decompose → team plan → worktree → delegate to subagents. Never skip straight to code. Never write code as Lead. Reference `@.claude/skills/pre-implementation-checklist.md` before starting.
 - Always include a reviewer agent in team configurations
 - Keep agent tasks scoped to <20 tool calls to avoid context kills
 - Builders must run `cargo fmt` and `cargo clippy -p <crate> -- -D warnings` before marking any task complete (not just at final gate)
@@ -155,7 +195,7 @@ Cockburn-style use cases in `docs/use-cases/`. Always check the relevant use cas
 - Git worktree (`git worktree add ../dir -b feature/uc-NNN`) enables parallel UC development without conflict risk — essential when two features touch overlapping files
 - Opaque envelope payloads (`Envelope::Feature(Vec<u8>)` with app-layer decode) scale indefinitely without bloating the wire format enum — standard pattern for domain-specific message types
 - Always work off of a worktree to allow multiple agents — `git worktree add` for each feature branch
-- Single-agent implementation is sufficient for medium-complexity UCs that follow established patterns; full Forge workflow (team, task-decompose) reserved for novel/high-complexity work
+- Single-agent implementation (one subagent, not the Lead writing code) is sufficient for medium-complexity UCs that follow established patterns; full team workflow (TeamCreate, parallel builders) reserved for High/XL complexity work. Either way, the Lead never writes code directly — it always goes through a subagent via the Task tool
 - When parallel agents create overlapping module files (e.g., `config.rs` vs `config/mod.rs`), the Lead must resolve the conflict before quality gate — Rust panics on dual module paths
 - Add workspace dependencies to root Cargo.toml BEFORE spawning parallel agents — prevents Cargo.toml merge conflicts
 - `cargo clippy --fix --allow-dirty` handles most lint auto-fixes; `private_interfaces` lint requires manual visibility adjustment
@@ -173,3 +213,5 @@ Cockburn-style use cases in `docs/use-cases/`. Always check the relevant use cas
 - TCP proxy pattern for testing network failures — place a proxy between client and server, abort proxy tasks to simulate disconnect (causes immediate RST on both ends). `relay_handle.abort()` does NOT close existing WebSocket connections because axum handler tasks are independently spawned
 - In async shared-state code, always try-then-fallback, never check-then-act (TOCTOU race). E.g., try `send_message()`, queue on failure — don't check `is_connected` then send
 - Gate merge on reviewer approval — do not merge feature branch before review completes
+- **CRITICAL**: Lead agent MUST use subagents (Task tool) for ALL implementation work — never write code directly. No exceptions, not even for "small" or "quick" changes. Subagents get dedicated context windows, can be parallelized, and prevent the lead's context from bloating. If you are the Lead and about to use Edit/Write on a .rs file, STOP and spawn a subagent instead
+- **CRITICAL**: Always spawn a reviewer agent alongside builder agents in multi-agent workflows — reviewer runs blind reviews against UC postconditions as each track completes, and integration gate is blocked on all reviews passing. Never merge without reviewer approval

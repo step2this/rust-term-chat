@@ -21,11 +21,22 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         }
     };
 
+    let (dot_color, status_text) = if app.is_connected {
+        (
+            theme::SUCCESS,
+            format!("Connected via {}", app.connection_info),
+        )
+    } else if app.connection_info == "Reconnecting" {
+        (theme::WARNING, "Reconnecting...".to_string())
+    } else {
+        (theme::PRESENCE_OFFLINE, "Disconnected".to_string())
+    };
+
     let status_line = Line::from(vec![
         Span::styled("TermChat v0.1.0", theme::bold()),
         Span::raw(" | "),
-        Span::styled("●", theme::normal().fg(theme::SUCCESS)),
-        Span::raw(" Connected (demo mode)"),
+        Span::styled("●", theme::normal().fg(dot_color)),
+        Span::raw(format!(" {status_text}")),
         Span::raw(" | "),
         Span::styled(help_text, theme::dimmed()),
     ]);

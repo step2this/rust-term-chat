@@ -45,49 +45,62 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 fn render_messages(frame: &mut Frame, area: Rect, app: &App) {
     let is_focused = app.focus == PanelFocus::Chat;
 
-    let items: Vec<ListItem> = app
-        .messages
-        .iter()
-        .map(|msg| {
-            let timestamp_style = theme::timestamp();
-            let status_style = theme::dimmed();
-            let is_agent = msg.sender.starts_with("agent:");
+    // Show empty state if no conversations exist
+    let items: Vec<ListItem> = if app.conversations.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "No conversations — connect with --remote-peer or /join-room",
+            theme::dimmed(),
+        )))]
+    } else {
+        app.current_messages()
+            .iter()
+            .map(|msg| {
+                let timestamp_style = theme::timestamp();
+                let status_style = theme::dimmed();
+                let is_agent = msg.sender.starts_with("agent:");
 
-            let (display_sender, sender_style) = if is_agent {
-                // Strip the "agent:" prefix and show [Agent] badge
-                let name = msg.sender.strip_prefix("agent:").unwrap_or(&msg.sender);
-                (format!("[Agent] {name}"), theme::normal().fg(theme::AGENT))
-            } else if msg.sender == "System" {
-                (msg.sender.clone(), theme::system_message())
-            } else {
-                (
-                    msg.sender.clone(),
-                    theme::normal().fg(theme::sender_color(&msg.sender)),
-                )
-            };
+                let (display_sender, sender_style) = if is_agent {
+                    // Strip the "agent:" prefix and show [Agent] badge
+                    let name = msg.sender.strip_prefix("agent:").unwrap_or(&msg.sender);
+                    (format!("[Agent] {name}"), theme::normal().fg(theme::AGENT))
+                } else if msg.sender == "System" {
+                    (msg.sender.clone(), theme::system_message())
+                } else {
+                    (
+                        msg.sender.clone(),
+                        theme::normal().fg(theme::sender_color(&msg.sender)),
+                    )
+                };
 
-            let content_style = if msg.sender == "System" {
-                theme::system_message()
-            } else {
-                theme::normal()
-            };
+                let content_style = if msg.sender == "System" {
+                    theme::system_message()
+                } else {
+                    theme::normal()
+                };
 
-            let line = Line::from(vec![
-                Span::styled(&msg.timestamp, timestamp_style),
-                Span::raw(" "),
-                Span::styled(display_sender, sender_style),
-                Span::raw(": "),
-                Span::styled(&msg.content, content_style),
-                Span::raw(" "),
-                Span::styled(msg.status.symbol(), status_style),
-            ]);
+                let line = Line::from(vec![
+                    Span::styled(&msg.timestamp, timestamp_style),
+                    Span::raw(" "),
+                    Span::styled(display_sender, sender_style),
+                    Span::raw(": "),
+                    Span::styled(&msg.content, content_style),
+                    Span::raw(" "),
+                    Span::styled(msg.status.symbol(), status_style),
+                ]);
 
-            ListItem::new(line)
-        })
-        .collect();
+                ListItem::new(line)
+            })
+            .collect()
+    };
+
+    // Update title to show selected conversation name
+    let title = app.selected_conversation_name().map_or_else(
+        || "Chat: (none)".to_string(),
+        |conv_name| format!("Chat: {conv_name}"),
+    );
 
     let block = Block::default()
-        .title("Chat")
+        .title(title)
         .title_style(theme::panel_title(theme::CHAT_TITLE))
         .borders(Borders::ALL)
         .border_style(if is_focused {

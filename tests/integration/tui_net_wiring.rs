@@ -92,6 +92,7 @@ async fn two_peers_exchange_messages_via_relay() {
     // Alice sends a message to Bob.
     alice_cmd_tx
         .send(NetCommand::SendMessage {
+            conversation_id: "@ test".to_string(),
             text: "Hello from Alice!".to_string(),
         })
         .await
@@ -137,6 +138,7 @@ async fn delivery_ack_produces_status_changed_event() {
     // Alice sends a message.
     alice_cmd_tx
         .send(NetCommand::SendMessage {
+            conversation_id: "@ test".to_string(),
             text: "Ack test message".to_string(),
         })
         .await
@@ -195,6 +197,7 @@ async fn shutdown_command_terminates_cleanly() {
     // Sending another command should fail (channel closed).
     let result = cmd_tx
         .send(NetCommand::SendMessage {
+            conversation_id: "@ test".to_string(),
             text: "after shutdown".to_string(),
         })
         .await;
@@ -226,6 +229,7 @@ async fn bidirectional_message_exchange() {
     // Alice → Bob
     alice_cmd_tx
         .send(NetCommand::SendMessage {
+            conversation_id: "@ test".to_string(),
             text: "Hi Bob!".to_string(),
         })
         .await
@@ -245,6 +249,7 @@ async fn bidirectional_message_exchange() {
     // Bob → Alice
     bob_cmd_tx
         .send(NetCommand::SendMessage {
+            conversation_id: "@ test".to_string(),
             text: "Hi Alice!".to_string(),
         })
         .await

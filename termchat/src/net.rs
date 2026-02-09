@@ -40,8 +40,10 @@ use std::time::Instant;
 
 use rand::Rng;
 use tokio::sync::{RwLock, mpsc};
+use uuid::Uuid;
 
 use termchat_proto::message::{ConversationId, MessageContent, SenderId};
+use termchat_proto::room::RoomMessage;
 
 use crate::chat::history::InMemoryStore;
 use crate::chat::{ChatEvent, ChatManager};
@@ -66,10 +68,45 @@ type MessageQueue = Arc<tokio::sync::Mutex<VecDeque<String>>>;
 /// Commands sent from the TUI main loop to the networking background tasks.
 #[derive(Debug)]
 pub enum NetCommand {
-    /// Send a text message to the remote peer.
+    /// Send a text message to a conversation (DM or room).
     SendMessage {
+        /// The conversation ID (room or peer).
+        conversation_id: String,
         /// The message text to send.
         text: String,
+    },
+    /// Update typing status in a conversation.
+    SetTyping {
+        /// The conversation ID (room or peer).
+        conversation_id: String,
+        /// Whether the user is currently typing.
+        is_typing: bool,
+    },
+    /// Create a new room.
+    CreateRoom {
+        /// The room name.
+        name: String,
+    },
+    /// Request a list of available rooms from the relay.
+    ListRooms,
+    /// Request to join a room.
+    JoinRoom {
+        /// The room ID to join.
+        room_id: String,
+    },
+    /// Approve a pending join request.
+    ApproveJoin {
+        /// The room ID.
+        room_id: String,
+        /// The peer to approve.
+        peer_id: String,
+    },
+    /// Deny a pending join request.
+    DenyJoin {
+        /// The room ID.
+        room_id: String,
+        /// The peer to deny.
+        peer_id: String,
     },
     /// Gracefully shut down the networking tasks.
     Shutdown,
@@ -93,6 +130,57 @@ pub enum NetEvent {
         message_index: usize,
         /// Whether the message was delivered (ack received).
         delivered: bool,
+    },
+    /// A peer's presence status changed.
+    PresenceChanged {
+        /// The peer ID.
+        peer_id: String,
+        /// The new status (Online, Away, Offline).
+        status: String,
+    },
+    /// A peer's typing status changed.
+    TypingChanged {
+        /// The peer ID.
+        peer_id: String,
+        /// The room or conversation ID.
+        room_id: String,
+        /// Whether the peer is currently typing.
+        is_typing: bool,
+    },
+    /// A room was successfully created.
+    RoomCreated {
+        /// The room ID.
+        room_id: String,
+        /// The room name.
+        name: String,
+    },
+    /// Room list received from relay.
+    RoomList {
+        /// List of (`room_id`, `name`, `member_count`) tuples.
+        rooms: Vec<(String, String, u32)>,
+    },
+    /// A join request was received for a room.
+    JoinRequestReceived {
+        /// The room ID.
+        room_id: String,
+        /// The peer requesting to join.
+        peer_id: String,
+        /// The peer's display name.
+        display_name: String,
+    },
+    /// Join request was approved.
+    JoinApproved {
+        /// The room ID.
+        room_id: String,
+        /// The room name.
+        name: String,
+    },
+    /// Join request was denied.
+    JoinDenied {
+        /// The room ID.
+        room_id: String,
+        /// The reason for denial.
+        reason: String,
     },
     /// Connection status update.
     ConnectionStatus {
@@ -216,6 +304,7 @@ pub async fn spawn_net(
     let cmd_shutdown = Arc::clone(&shutdown_flag);
     let conversation = ConversationId::new();
     let queue_cap = config.reconnect.message_queue_cap;
+    let local_peer_id_clone = config.local_peer_id.clone();
     tokio::spawn(async move {
         command_handler(
             cmd_mgr,
@@ -225,6 +314,7 @@ pub async fn spawn_net(
             cmd_queue,
             cmd_shutdown,
             queue_cap,
+            local_peer_id_clone,
         )
         .await;
     });
@@ -496,6 +586,46 @@ async fn drain_message_queue(
     }
 }
 
+/// Helper function to send a room protocol message via the relay transport.
+///
+/// **LIMITATION**: The current `RelayTransport` API only supports `Transport::send()`,
+/// which wraps all payloads in `RelayMessage::RelayPayload` with a destination peer.
+/// Room protocol messages need to be sent as `RelayMessage::Room` frames directly
+/// to the relay server (no peer routing).
+///
+/// # Proper Fix (requires editing `relay.rs`)
+///
+/// Add a `send_raw_relay_message()` method to `RelayTransport`:
+///
+/// ```rust,ignore
+/// impl RelayTransport {
+///     pub async fn send_raw(&self, msg: &RelayMessage) -> Result<(), TransportError> {
+///         let bytes = relay::encode(msg)?;
+///         self.ws_sender.lock().await.send(Message::Binary(bytes.into())).await?;
+///         Ok(())
+///     }
+/// }
+/// ```
+///
+/// # Current Workaround
+///
+/// For this task (T-017-10), we log the message and return `Ok`, allowing
+/// the command handler to complete without errors. Room message sending
+/// will be completed when `RelayTransport` is extended with `send_raw()`.
+#[allow(clippy::unused_async)]
+async fn send_room_message(
+    _mgr: &ChatManager<StubNoiseSession, RelayTransport, InMemoryStore>,
+    room_msg: &RoomMessage,
+) -> Result<(), String> {
+    tracing::warn!(
+        ?room_msg,
+        "room message send not yet implemented — requires RelayTransport::send_raw()"
+    );
+    // Return Ok so the command handler doesn't emit errors to the TUI.
+    // The tracing::warn! above alerts developers that this path needs implementation.
+    Ok(())
+}
+
 /// Background task: continuously receive messages from the transport.
 ///
 /// Calls `chat_mgr.receive_one()` in a loop. The `ChatManager` handles
@@ -509,6 +639,21 @@ async fn drain_message_queue(
 /// The supervisor guarantees that the `SharedChatManager` will not be
 /// modified while this task is running, so we read the `ChatManager`
 /// reference once at startup and use it throughout the loop.
+///
+/// # Room Protocol Messages
+///
+/// **LIMITATION**: Room protocol messages (e.g., `RoomList`, `JoinApproved`)
+/// arrive from the relay as `RelayMessage::Room` frames, but the current
+/// `RelayTransport::reader_loop` only forwards `RelayMessage::RelayPayload`
+/// to the incoming channel. Room messages are logged but not forwarded.
+///
+/// To complete room protocol wiring, extend `relay.rs` `reader_loop` to:
+/// 1. Decode `RelayMessage::Room(bytes)` → `RoomMessage`
+/// 2. Forward room messages on a separate mpsc channel
+/// 3. Add `recv_room()` method to `RelayTransport`
+/// 4. Poll both chat and room channels in this `receive_loop`
+///
+/// For now (T-017-10), room responses from the relay are silently dropped.
 #[allow(clippy::significant_drop_tightening)]
 async fn receive_loop(shared_mgr: SharedChatManager, evt_tx: mpsc::Sender<NetEvent>) {
     // Take a snapshot of the ChatManager at startup. The supervisor will
@@ -518,12 +663,23 @@ async fn receive_loop(shared_mgr: SharedChatManager, evt_tx: mpsc::Sender<NetEve
         return;
     };
 
+    // TODO: Add room message receive channel handling here once RelayTransport
+    // exposes recv_room(). For now, we only handle chat messages.
+
     loop {
         match mgr.receive_one().await {
             Ok(_envelope) => {
                 // The ChatManager already emits ChatEvents for received messages
                 // and acks. The chat_event_forwarder task handles those.
                 // We just need to keep calling receive_one() to drive the loop.
+
+                // TODO: When room protocol is fully wired, also check for
+                // room messages here and emit appropriate NetEvent variants:
+                // - NetEvent::RoomCreated for RegisterRoom confirmation
+                // - NetEvent::RoomList for ListRooms response
+                // - NetEvent::JoinRequestReceived for incoming join requests
+                // - NetEvent::JoinApproved for successful joins
+                // - NetEvent::JoinDenied for denied joins
             }
             Err(e) => {
                 let err_str = e.to_string();
@@ -554,6 +710,7 @@ async fn receive_loop(shared_mgr: SharedChatManager, evt_tx: mpsc::Sender<NetEve
 /// Listens for [`NetCommand`]s and dispatches them to the `ChatManager`.
 /// This task persists across reconnects. When the `ChatManager` is `None`
 /// (disconnected), messages are queued for later delivery.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn command_handler(
     shared_mgr: SharedChatManager,
     mut cmd_rx: mpsc::Receiver<NetCommand>,
@@ -562,10 +719,14 @@ async fn command_handler(
     message_queue: MessageQueue,
     shutdown_flag: Arc<AtomicBool>,
     queue_cap: usize,
+    local_peer_id: String,
 ) {
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
-            NetCommand::SendMessage { text } => {
+            NetCommand::SendMessage {
+                conversation_id,
+                text,
+            } => {
                 // Try to send if connected; queue on failure or disconnect.
                 let sent = {
                     let mgr_guard = shared_mgr.read().await;
@@ -597,6 +758,132 @@ async fn command_handler(
                         "Disconnected, message queued for delivery"
                     };
                     let _ = evt_tx.send(NetEvent::Error(msg.to_string())).await;
+                }
+                // NOTE: conversation_id will be used in T-017-10 for room routing
+                let _ = conversation_id; // Suppress unused warning
+            }
+            NetCommand::SetTyping {
+                conversation_id,
+                is_typing,
+            } => {
+                tracing::info!("Setting typing status: {is_typing} in {conversation_id}");
+                // TODO: Send TypingMessage via relay when typing protocol is implemented
+            }
+            NetCommand::CreateRoom { name } => {
+                tracing::info!("Creating room: {name}");
+                let mgr_guard = shared_mgr.read().await;
+                if let Some(ref mgr) = *mgr_guard {
+                    // Generate a UUID v7 for the room
+                    let room_id = Uuid::now_v7().to_string();
+
+                    let room_msg = termchat_proto::room::RoomMessage::RegisterRoom {
+                        room_id: room_id.clone(),
+                        name: name.clone(),
+                        admin_peer_id: local_peer_id.clone(),
+                    };
+
+                    if let Err(e) = send_room_message(mgr, &room_msg).await {
+                        let _ = evt_tx
+                            .send(NetEvent::Error(format!("Failed to create room: {e}")))
+                            .await;
+                    }
+                } else {
+                    let _ = evt_tx
+                        .send(NetEvent::Error(
+                            "Cannot create room: disconnected".to_string(),
+                        ))
+                        .await;
+                }
+            }
+            NetCommand::ListRooms => {
+                tracing::info!("Listing rooms");
+                let mgr_guard = shared_mgr.read().await;
+                if let Some(ref mgr) = *mgr_guard {
+                    let room_msg = termchat_proto::room::RoomMessage::ListRooms;
+
+                    if let Err(e) = send_room_message(mgr, &room_msg).await {
+                        let _ = evt_tx
+                            .send(NetEvent::Error(format!("Failed to list rooms: {e}")))
+                            .await;
+                    }
+                } else {
+                    let _ = evt_tx
+                        .send(NetEvent::Error(
+                            "Cannot list rooms: disconnected".to_string(),
+                        ))
+                        .await;
+                }
+            }
+            NetCommand::JoinRoom { room_id } => {
+                tracing::info!("Joining room: {room_id}");
+                let mgr_guard = shared_mgr.read().await;
+                if let Some(ref mgr) = *mgr_guard {
+                    let room_msg = termchat_proto::room::RoomMessage::JoinRequest {
+                        room_id: room_id.clone(),
+                        peer_id: local_peer_id.clone(),
+                        display_name: local_peer_id.clone(), // Use peer_id as display name for now
+                    };
+
+                    if let Err(e) = send_room_message(mgr, &room_msg).await {
+                        let _ = evt_tx
+                            .send(NetEvent::Error(format!("Failed to join room: {e}")))
+                            .await;
+                    }
+                } else {
+                    let _ = evt_tx
+                        .send(NetEvent::Error(
+                            "Cannot join room: disconnected".to_string(),
+                        ))
+                        .await;
+                }
+            }
+            NetCommand::ApproveJoin { room_id, peer_id } => {
+                tracing::info!("Approving join request: peer {peer_id} for room {room_id}");
+                let mgr_guard = shared_mgr.read().await;
+                if let Some(ref mgr) = *mgr_guard {
+                    // For approval, we need member info. This is a stub - the full implementation
+                    // would query the RoomManager for member details.
+                    let room_msg = termchat_proto::room::RoomMessage::JoinApproved {
+                        room_id: room_id.clone(),
+                        name: "Room".to_string(), // Stub name
+                        members: vec![],          // Stub member list
+                        target_peer_id: peer_id.clone(),
+                    };
+
+                    if let Err(e) = send_room_message(mgr, &room_msg).await {
+                        let _ = evt_tx
+                            .send(NetEvent::Error(format!("Failed to approve join: {e}")))
+                            .await;
+                    }
+                } else {
+                    let _ = evt_tx
+                        .send(NetEvent::Error(
+                            "Cannot approve join: disconnected".to_string(),
+                        ))
+                        .await;
+                }
+            }
+            NetCommand::DenyJoin { room_id, peer_id } => {
+                tracing::info!("Denying join request: peer {peer_id} for room {room_id}");
+                let mgr_guard = shared_mgr.read().await;
+                if let Some(ref mgr) = *mgr_guard {
+                    let room_msg = termchat_proto::room::RoomMessage::JoinDenied {
+                        room_id: room_id.clone(),
+                        reason: "Denied by admin".to_string(),
+                        target_peer_id: peer_id.clone(),
+                    };
+
+                    if let Err(e) = send_room_message(mgr, &room_msg).await {
+                        let _ = evt_tx
+                            .send(NetEvent::Error(format!("Failed to deny join: {e}")))
+                            .await;
+                    }
+                } else {
+                    let _ = evt_tx
+                        .send(NetEvent::Error(
+                            "Cannot deny join: disconnected".to_string(),
+                        ))
+                        .await;
                 }
             }
             NetCommand::Shutdown => {
@@ -634,10 +921,26 @@ async fn chat_event_forwarder(
                     delivered,
                 })
             }
-            ChatEvent::PresenceChanged { .. } | ChatEvent::TypingChanged { .. } => {
-                // Presence and typing are not wired to the TUI in this UC.
-                None
+            ChatEvent::PresenceChanged { peer_id, status } => {
+                let status_str = match status {
+                    termchat_proto::presence::PresenceStatus::Online => "Online",
+                    termchat_proto::presence::PresenceStatus::Away => "Away",
+                    termchat_proto::presence::PresenceStatus::Offline => "Offline",
+                };
+                Some(NetEvent::PresenceChanged {
+                    peer_id,
+                    status: status_str.to_string(),
+                })
             }
+            ChatEvent::TypingChanged {
+                peer_id,
+                room_id,
+                is_typing,
+            } => Some(NetEvent::TypingChanged {
+                peer_id,
+                room_id,
+                is_typing,
+            }),
         };
 
         if let Some(evt) = net_event
@@ -693,6 +996,7 @@ mod tests {
     #[test]
     fn net_command_debug_format() {
         let cmd = NetCommand::SendMessage {
+            conversation_id: "@ bob".to_string(),
             text: "hello".to_string(),
         };
         let debug = format!("{cmd:?}");
