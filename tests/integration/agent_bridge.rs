@@ -1113,3 +1113,195 @@ async fn e2e_membership_update_forwarded_via_run_loop() {
         .expect("join");
     assert_eq!(cleanup.reason, DisconnectReason::RoomClosed);
 }
+
+// =============================================================================
+// UC-015: Agent Crypto/Transport Fan-Out — Real Noise XX integration
+// =============================================================================
+
+/// Verify that agent fan-out messages are encrypted with real Noise XX crypto
+/// (not stub XOR) when delivered through the ChatManager pipeline.
+///
+/// This test:
+/// 1. Performs a real Noise XX handshake between two Identity keypairs
+/// 2. Creates ChatManagers using the resulting NoiseXXSession (not StubNoiseSession)
+/// 3. Sends a message through Alice's ChatManager
+/// 4. Verifies the wire bytes on the transport are encrypted (no plaintext)
+/// 5. Receives and decrypts on Bob's ChatManager, recovering the original content
+#[tokio::test]
+async fn noise_xx_crypto_fanout_via_chat_manager() {
+    use termchat::chat::ChatManager;
+    use termchat::chat::history::InMemoryStore;
+    use termchat::crypto::CryptoSession;
+    use termchat::crypto::keys::Identity;
+    use termchat::crypto::noise::{NoiseHandshake, NoiseXXSession};
+    use termchat::transport::loopback::LoopbackTransport;
+    use termchat::transport::{PeerId, Transport};
+    use termchat_proto::message::{
+        ConversationId, Envelope, MessageContent, MessageStatus, SenderId,
+    };
+
+    // --- Step 1: Generate identities and perform Noise XX handshake ---
+    let alice_identity = Identity::generate().expect("generate alice identity");
+    let bob_identity = Identity::generate().expect("generate bob identity");
+
+    let mut alice_hs = NoiseHandshake::new_initiator(&alice_identity).expect("alice initiator");
+    let mut bob_hs = NoiseHandshake::new_responder(&bob_identity).expect("bob responder");
+
+    // 3-message Noise XX dance
+    let msg1 = alice_hs.write_message(&[]).expect("msg1");
+    bob_hs.read_message(&msg1).expect("bob read msg1");
+
+    let msg2 = bob_hs.write_message(&[]).expect("msg2");
+    alice_hs.read_message(&msg2).expect("alice read msg2");
+
+    let msg3 = alice_hs.write_message(&[]).expect("msg3");
+    bob_hs.read_message(&msg3).expect("bob read msg3");
+
+    assert!(alice_hs.is_complete(), "alice handshake should be complete");
+    assert!(bob_hs.is_complete(), "bob handshake should be complete");
+
+    // Transition to transport sessions
+    let alice_session = alice_hs.into_transport().expect("alice into_transport");
+    let bob_session = bob_hs.into_transport().expect("bob into_transport");
+
+    assert!(alice_session.is_established());
+    assert!(bob_session.is_established());
+
+    // --- Step 2: Create ChatManagers with real NoiseXXSession + LoopbackTransport ---
+    let (transport_a, transport_b) =
+        LoopbackTransport::create_pair(PeerId::new("alice"), PeerId::new("bob"), 32);
+
+    // Second pair to inspect raw wire bytes independently
+    let (wire_transport_a, wire_transport_b) =
+        LoopbackTransport::create_pair(PeerId::new("alice"), PeerId::new("bob"), 32);
+
+    let (alice_mgr, _alice_events): (
+        ChatManager<NoiseXXSession, LoopbackTransport, InMemoryStore>,
+        _,
+    ) = ChatManager::new(
+        alice_session,
+        transport_a,
+        SenderId::new(vec![0xAA]),
+        PeerId::new("bob"),
+        32,
+    );
+
+    let (bob_mgr, mut bob_events): (
+        ChatManager<NoiseXXSession, LoopbackTransport, InMemoryStore>,
+        _,
+    ) = ChatManager::new(
+        bob_session,
+        transport_b,
+        SenderId::new(vec![0xBB]),
+        PeerId::new("alice"),
+        32,
+    );
+
+    // --- Step 3: Send a message through Alice's ChatManager ---
+    let plaintext_content = "Hello from agent crypto fan-out test!";
+    let conversation = ConversationId::new();
+    let (_msg_id, status) = alice_mgr
+        .send_message(
+            MessageContent::Text(plaintext_content.to_string()),
+            conversation,
+        )
+        .await
+        .expect("alice send_message");
+
+    assert_eq!(status, MessageStatus::Sent);
+
+    // --- Step 4: Bob receives and decrypts ---
+    let envelope = bob_mgr.receive_one().await.expect("bob receive_one");
+
+    match &envelope {
+        Envelope::Chat(msg) => {
+            let MessageContent::Text(ref text) = msg.content;
+            assert_eq!(
+                text, plaintext_content,
+                "decrypted content should match original"
+            );
+        }
+        other => panic!("expected Chat envelope, got {other:?}"),
+    }
+
+    // Verify Bob emitted a MessageReceived event
+    let event = bob_events.try_recv().expect("bob event");
+    match event {
+        termchat::chat::ChatEvent::MessageReceived { message, .. } => {
+            let MessageContent::Text(ref text) = message.content;
+            assert_eq!(text, plaintext_content);
+        }
+        other => panic!("expected MessageReceived, got {other:?}"),
+    }
+
+    // --- Step 5: Verify wire bytes are encrypted (via separate pair) ---
+    // Perform a second handshake for the wire-inspection pair
+    let alice_identity2 = Identity::generate().expect("generate alice identity 2");
+    let bob_identity2 = Identity::generate().expect("generate bob identity 2");
+
+    let mut alice_hs2 = NoiseHandshake::new_initiator(&alice_identity2).expect("alice initiator 2");
+    let mut bob_hs2 = NoiseHandshake::new_responder(&bob_identity2).expect("bob responder 2");
+
+    let m1 = alice_hs2.write_message(&[]).expect("m1");
+    bob_hs2.read_message(&m1).expect("bob read m1");
+    let m2 = bob_hs2.write_message(&[]).expect("m2");
+    alice_hs2.read_message(&m2).expect("alice read m2");
+    let m3 = alice_hs2.write_message(&[]).expect("m3");
+    bob_hs2.read_message(&m3).expect("bob read m3");
+
+    let alice_session2 = alice_hs2.into_transport().expect("alice into_transport 2");
+    let bob_session2 = bob_hs2.into_transport().expect("bob into_transport 2");
+
+    let (wire_alice, _wire_events): (
+        ChatManager<NoiseXXSession, LoopbackTransport, InMemoryStore>,
+        _,
+    ) = ChatManager::new(
+        alice_session2,
+        wire_transport_a,
+        SenderId::new(vec![0xAA]),
+        PeerId::new("bob"),
+        32,
+    );
+
+    // Send the same message through the wire-inspection ChatManager
+    wire_alice
+        .send_message(
+            MessageContent::Text(plaintext_content.to_string()),
+            ConversationId::new(),
+        )
+        .await
+        .expect("wire alice send");
+
+    // Read raw bytes from the wire transport (Bob's side, raw recv)
+    let (_from, wire_bytes) = wire_transport_b.recv().await.expect("wire recv");
+
+    // Plaintext should NOT appear in wire bytes
+    assert!(
+        !wire_bytes
+            .windows(plaintext_content.len())
+            .any(|w| w == plaintext_content.as_bytes()),
+        "plaintext must not appear in wire bytes"
+    );
+
+    // Wire bytes should be larger than plaintext due to AEAD tag + serialization overhead
+    assert!(
+        wire_bytes.len() > plaintext_content.len(),
+        "encrypted payload should be larger than plaintext"
+    );
+
+    // Verify Bob2 can decrypt the wire bytes using the real NoiseXXSession
+    let decrypted = bob_session2.decrypt(&wire_bytes).expect("bob2 decrypt");
+    // The decrypted bytes are a serialized Envelope, not raw plaintext
+    let decoded: Envelope =
+        termchat_proto::codec::decode(&decrypted).expect("decode decrypted envelope");
+    match decoded {
+        Envelope::Chat(msg) => {
+            let MessageContent::Text(ref text) = msg.content;
+            assert_eq!(
+                text, plaintext_content,
+                "decrypted wire content should match original"
+            );
+        }
+        other => panic!("expected Chat envelope from wire decode, got {other:?}"),
+    }
+}
