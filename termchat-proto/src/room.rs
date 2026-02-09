@@ -50,7 +50,7 @@ pub enum RoomMessage {
         display_name: String,
     },
 
-    /// Admin approves a join request (sent to the joiner).
+    /// Admin approves a join request (sent to the joiner via relay).
     JoinApproved {
         /// The room that was joined.
         room_id: String,
@@ -58,17 +58,17 @@ pub enum RoomMessage {
         name: String,
         /// Current member list (including the newly approved member).
         members: Vec<MemberInfo>,
-        /// `PeerId` of the peer this approval is intended for.
+        /// `PeerId` of the peer who requested to join (routing target).
         target_peer_id: String,
     },
 
-    /// Admin denies a join request (sent to the joiner).
+    /// Admin denies a join request (sent to the joiner via relay).
     JoinDenied {
         /// The room that denied entry.
         room_id: String,
         /// Reason for denial.
         reason: String,
-        /// `PeerId` of the peer this denial is intended for.
+        /// `PeerId` of the peer who requested to join (routing target).
         target_peer_id: String,
     },
 

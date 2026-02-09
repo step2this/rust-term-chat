@@ -404,16 +404,86 @@ async fn handle_room_message(peer_id: &str, room_bytes: &[u8], state: &Arc<Relay
             }
         }
         room::RoomMessage::JoinApproved {
-            ref target_peer_id, ..
-        }
-        | room::RoomMessage::JoinDenied {
-            ref target_peer_id, ..
+            ref room_id,
+            ref target_peer_id,
+            ..
         } => {
-            rooms::route_room_message(state, target_peer_id, &room_msg).await;
+            tracing::info!(
+                peer_id = %peer_id,
+                room_id = %room_id,
+                target = %target_peer_id,
+                "routing JoinApproved to target peer"
+            );
+            let target = target_peer_id.clone();
+            route_room_to_peer(state, peer_id, &target, &room_msg).await;
+        }
+        room::RoomMessage::JoinDenied {
+            ref room_id,
+            ref target_peer_id,
+            ..
+        } => {
+            tracing::info!(
+                peer_id = %peer_id,
+                room_id = %room_id,
+                target = %target_peer_id,
+                "routing JoinDenied to target peer"
+            );
+            let target = target_peer_id.clone();
+            route_room_to_peer(state, peer_id, &target, &room_msg).await;
         }
         room::RoomMessage::MembershipUpdate { .. } | room::RoomMessage::RoomList { .. } => {
             // Client-to-client or server-to-client only; no relay action needed.
         }
+    }
+}
+
+/// Routes a room message to a target peer, queuing it if the peer is offline.
+///
+/// On encoding failure, sends a `RelayMessage::Error` back to the sender.
+async fn route_room_to_peer(
+    state: &Arc<RelayState>,
+    sender_peer_id: &str,
+    target_peer_id: &str,
+    room_msg: &room::RoomMessage,
+) {
+    let room_bytes = match room::encode(room_msg) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to encode room message for routing");
+            let err = RelayMessage::Error {
+                reason: format!("room message encoding failed: {e}"),
+            };
+            send_to_peer(state, sender_peer_id, &err).await;
+            return;
+        }
+    };
+    let relay_msg = RelayMessage::Room(room_bytes.clone());
+
+    if let Some(sender) = state.get_sender(target_peer_id).await {
+        if let Ok(bytes) = relay::encode(&relay_msg)
+            && sender.send(Message::Binary(bytes.into())).is_err()
+        {
+            // Send failed, queue for later delivery.
+            tracing::warn!(
+                target = %target_peer_id,
+                "forward room message failed, queuing"
+            );
+            state.unregister(target_peer_id).await;
+            state
+                .store
+                .enqueue(target_peer_id, sender_peer_id, room_bytes)
+                .await;
+        }
+    } else {
+        // Target peer is offline — queue the encoded room message bytes.
+        state
+            .store
+            .enqueue(target_peer_id, sender_peer_id, room_bytes)
+            .await;
+        tracing::info!(
+            target = %target_peer_id,
+            "target peer offline, room message queued"
+        );
     }
 }
 
