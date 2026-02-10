@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project State
 
-Active development. Three-crate workspace initialized and building. Completed: UC-001 through UC-016 (Send, Receive, P2P, Relay, E2E, Rooms, Agent, Tasks, Presence, Live Relay, Auto-Reconnect, Polish, Dependency Hygiene, ChatManager Refactor, Agent Crypto Fan-Out, Join Relay Routing), Phase 1 (Hello Ratatui TUI). Sprint 10 complete: parallel feature branches for refactoring, integration testing, and relay routing. 699 tests passing.
+Active development. Three-crate workspace initialized and building. Completed: UC-001 through UC-017 (Send, Receive, P2P, Relay, E2E, Rooms, Agent, Tasks, Presence, Live Relay, Auto-Reconnect, Polish, Dependency Hygiene, ChatManager Refactor, Agent Crypto Fan-Out, Join Relay Routing, Connect TUI to Live Backend), Phase 1 (Hello Ratatui TUI). Sprint 11 complete: TUI wired to live backend state. 715 tests passing.
 
 ## MANDATORY: Forge Workflow & Delegation Rules
 
@@ -48,6 +48,8 @@ Active development. Three-crate workspace initialized and building. Completed: U
 
 **If you catch yourself about to use Edit or Write on a .rs file: STOP and spawn a subagent instead.**
 
+**Commit after every phase gate.** After Phase 1 gate passes → commit. After Phase 2C integration → commit. After Phase 3C → commit. After Gate 4 → commit. Small, frequent commits (~100-300 lines each). A 1000+ line commit means you forgot to commit at the gates.
+
 ## Build & Development Commands
 
 ```bash
@@ -68,6 +70,7 @@ cargo test --test agent_bridge           # UC-007 integration test
 cargo test --test presence_typing        # UC-009 integration test
 cargo test --test tui_net_wiring         # UC-010 integration test
 cargo test --test relay_reconnect        # UC-011 integration test
+cargo test --test tui_live_backend       # UC-017 integration test
 cargo test -p termchat-relay             # relay server unit tests
 cargo test --lib                         # unit tests only
 cargo test -p termchat-proto             # proto crate tests only
@@ -77,6 +80,27 @@ cargo clippy -- -D warnings
 # Full quality gate (run before committing)
 cargo fmt --check && cargo clippy -- -D warnings && cargo test && cargo deny check
 ```
+
+### Justfile (preferred over raw cargo commands)
+
+**ALWAYS use `just` commands instead of raw cargo pipelines.** The `justfile` at the workspace root defines the canonical quality recipes:
+
+```bash
+just                   # list all available recipes
+just quality           # full quality gate: fmt + lint + deny + test + unwrap-check
+just quality-full      # extended: quality + complexity + stats + geiger
+just fmt               # cargo fmt --check
+just lint              # cargo clippy --workspace -- -D warnings
+just deny              # cargo deny check (advisories, licenses, bans, sources)
+just test              # cargo test
+just unwrap-check      # verify zero unwrap()/expect() in production code
+just complexity        # rust-code-analysis-cli metrics (MI, cyclomatic)
+just stats             # tokei LOC stats
+just geiger            # cargo-geiger unsafe code detection
+```
+
+**Before committing**: run `just quality` (not the raw cargo commands).
+**For code reviews / grading**: run `just quality-full`.
 
 ## Architecture Quick Reference
 
@@ -152,7 +176,7 @@ When running multi-agent teams, assign module ownership to prevent merge conflic
 - Rust edition 2024
 - All public functions must have doc comments
 - No `unwrap()` in production code — use `Result` with `thiserror`
-- Commit after each completed use case, not after each file change — never bundle multiple UCs into one commit
+- **Commit early and often — after each completed phase or integration gate, NOT one big commit per UC.** In team workflows, the Lead must commit after each phase gate (e.g., after Phase 1 gate, after Phase 2C integration, after Phase 3C integration). This keeps commits small (~100-300 lines), bisectable, and reviewable. One 1700-line commit is a process failure. Never bundle an entire UC into a single commit. Never bundle multiple UCs into one commit either.
 - **ALWAYS USE THE FORGE.** See "MANDATORY: Forge Workflow & Delegation Rules" section above. UC doc → review → task-decompose → team plan → worktree → delegate to subagents. Never skip straight to code. Never write code as Lead. Reference `@.claude/skills/pre-implementation-checklist.md` before starting.
 - Always include a reviewer agent in team configurations
 - Keep agent tasks scoped to <20 tool calls to avoid context kills
@@ -215,3 +239,4 @@ Cockburn-style use cases in `docs/use-cases/`. Always check the relevant use cas
 - Gate merge on reviewer approval — do not merge feature branch before review completes
 - **CRITICAL**: Lead agent MUST use subagents (Task tool) for ALL implementation work — never write code directly. No exceptions, not even for "small" or "quick" changes. Subagents get dedicated context windows, can be parallelized, and prevent the lead's context from bloating. If you are the Lead and about to use Edit/Write on a .rs file, STOP and spawn a subagent instead
 - **CRITICAL**: Always spawn a reviewer agent alongside builder agents in multi-agent workflows — reviewer runs blind reviews against UC postconditions as each track completes, and integration gate is blocked on all reviews passing. Never merge without reviewer approval
+- **CRITICAL**: Commit after every phase gate, not one big commit per UC. UC-017 produced a 1700-line single commit because the Lead waited until Gate 4 to commit — this is wrong. Correct pattern: commit after Phase 1 gate, commit after Phase 2C integration, commit after Phase 3C integration, final commit after Gate 4. Each commit should be ~100-300 lines, bisectable, and independently reviewable

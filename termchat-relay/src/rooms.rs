@@ -194,23 +194,6 @@ pub async fn route_join_request(
     Ok(())
 }
 
-/// Routes a `JoinApproved` or `JoinDenied` message back to the target peer.
-pub async fn route_room_message(state: &Arc<RelayState>, target_peer_id: &str, msg: &RoomMessage) {
-    let room_bytes = match room::encode(msg) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to encode room message for routing");
-            return;
-        }
-    };
-    let relay_msg = RelayMessage::Room(room_bytes);
-    if let Some(sender) = state.get_sender(target_peer_id).await
-        && let Ok(bytes) = relay::encode(&relay_msg)
-    {
-        let _ = sender.send(Message::Binary(bytes.into()));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
